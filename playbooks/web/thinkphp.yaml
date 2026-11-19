@@ -1,0 +1,11 @@
+name: thinkphp-rce-surface
+pack: ext-web
+match:
+  tech:
+    - ThinkPHP
+actions:
+  - 版本识别: /index.php/_fault 或报错页泄露版本
+  - TP5.x RCE 路由: /index.php?s=index/think\app/invokefunction&function=call_user_func_array（验证回显即可，不落 webshell）
+  - TP6.x: 反序列化与多语言 RCE 面（CVE-2022-38352 等）
+  - 调试页: trace 与 app_debug 泄露
+notes: 只验证回显；getshell 属利用阶段需 finding 门控与 operator 确认

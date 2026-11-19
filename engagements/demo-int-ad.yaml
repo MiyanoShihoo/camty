@@ -1,0 +1,11 @@
+# 交战配置示例：内网域场景，target_cidr 换成授权网段
+name: demo-int-ad
+pack: int-ad
+target_cidr: 192.168.100.0/24
+scope:
+  domains: []
+  cidrs:
+    - 192.168.100.0/24
+  ips: []
+  min_interval_seconds: 0.5
+# 凭据/横向/维持步骤默认 confirm: true；仅测试靶场可开 auto_confirm

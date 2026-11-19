@@ -1,0 +1,11 @@
+name: tomcat-attack-surface
+pack: ext-web
+match:
+  tech:
+    - Tomcat
+actions:
+  - 管理面: /manager/html 与 /host-manager 弱口令（tomcat:tomcat 等默认对）
+  - 示例目录: /examples/servlets/（信息泄露与旧版样例）
+  - AJP: 8009 端口 Ghostcat（CVE-2020-1938）任意文件读指纹
+  - 部署面: manager 部署 WAR → 上线（需 operator 确认，属利用阶段）
+notes: manager 爆破属凭据类动作，走确认流；命中后优先走 CVE 而非爆破

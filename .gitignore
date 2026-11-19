@@ -1,0 +1,34 @@
+keys.json
+__pycache__/
+*.tmp
+engagements/*/
+!engagements/*.yaml
+c2/implant/*.exe
+c2/server/c2-ops.jsonl
+c2/server/*.log
+# ===== 补齐（2026-11-18 发布审计） =====
+scripts/*_cred*.json
+engagements/*.yaml
+!engagements/demo-*.yaml
+jwt_secrets.txt
+cracked.txt
+rockyou_mini.txt
+*.exe
+*.pdb
+*.b64
+7zr.exe
+vendor/
+engagements/*/console-spec-full.json
+engagements/*/bundle.js
+*.log
+ARTEX-main/
+ARTEX-main.zip
+# 交战专属脚本（含目标凭据/一次性流程，不入库）
+scripts/onyx_*.py
+scripts/wbssr_*.py
+dist/
+hashcat_tmp.7z
+usage.jsonl
+result.txt
+c2/implant/e2e-ops.jsonl
+# 本机交互便利变量不走仓库（README 说明 CAMTY_TOOLS_DIR 用法）

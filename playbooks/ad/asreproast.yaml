@@ -1,0 +1,10 @@
+name: asreproastable-user
+pack: int-ad
+match:
+  finding:
+    - asreproastable
+actions:
+  - 提取: 无预认证用户的 hash（GetNPUsers.py -no-pass -usersfile）
+  - 离线破解: hashcat -m 18200，优先域内弱口令模式
+  - 复用验证: 破解出的明文只对 scope 内账号验证，凭据入台账
+notes: 与 kerberoast 同属凭据类；破解成功后走 cred-test（finding 门控）

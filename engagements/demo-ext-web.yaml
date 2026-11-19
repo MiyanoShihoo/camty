@@ -1,0 +1,12 @@
+# 交战配置示例：把 root_domain 换成授权目标后再用
+name: demo-ext-web
+pack: ext-web
+root_domain: example.com
+scope:
+  domains:
+    - example.com
+  cidrs: []
+  ips: []
+  min_interval_seconds: 0.5
+# auto_confirm: true   # 仅测试靶场允许开启；开启后 confirm 步骤不再询问
+evidence_note: 证据与审计落在本目录下 demo-ext-web/ 子目录

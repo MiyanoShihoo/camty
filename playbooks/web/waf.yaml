@@ -1,0 +1,23 @@
+name: waf-detected
+pack: ext-web
+match:
+  tech:
+    - cloudflare
+    - sucuri
+    - akamai
+    - imperva
+    - f5-bigip
+    - aliyun-waf
+    - safedog
+    - baidu-yunjia
+    - qianxin-waf
+    - modsecurity
+    - aws-waf
+    - yundun
+    - binfense
+    - anquanbao
+actions:
+  - 降速: 命中 WAF 后把请求间隔拉到 min_interval_seconds ≥ 2，避免触发封禁
+  - 换面: "注入探测开编码混淆（inj-probe 传 evasion: true），目录探测降并发或暂停"
+  - 走真实浏览器面: 高频探测易被 bot 判定拦截，指纹与交互交给 browser-visit/action
+notes: WAF 在场时禁用无并发控制的目录爆破；优先会话化浏览 + js-recon 被动测绘

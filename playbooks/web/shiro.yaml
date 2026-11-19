@@ -1,0 +1,11 @@
+name: shiro-rememberme-surface
+pack: ext-web
+match:
+  tech:
+    - Apache Shiro
+    - Shiro
+actions:
+  - 指纹: 响应 Set-Cookie rememberMe=deleteMe
+  - 默认密钥爆破面: kPH+bIxk5D2deZiIxcaaaA== 等 100+ 已知 key（检测 padding 正误即停，不构造利用链）
+  - 已知 CVE: CVE-2016-4437（1.2.4 默认 key）、Shiro-721（padding oracle）
+notes: 密钥命中后入台账；反序列化利用链构造属利用阶段，需 finding 门控与确认

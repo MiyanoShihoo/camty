@@ -1,0 +1,10 @@
+name: laps-password-read
+pack: int-ad
+match:
+  finding:
+    - laps
+actions:
+  - 权限检查: 当前账户对目标 OU 的 LAPS 密码读取权限（ms-Mcs-AdmPwd 属性）
+  - 提取: 有权限即读本地管理员密码（PowerView Get-LAPSPassword / ldapsearch）
+  - 验证: 对 scope 内对应主机走 cred-test，凭据入台账
+notes: LAPS 密码是横向移动高价值凭据；读取动作留证入审计

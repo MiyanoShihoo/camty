@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Camty 交战面板</title>
+<style>
+body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;background:#0f1115;color:#e5e7eb}
+header{padding:1rem 2rem;background:#161a22;border-bottom:1px solid #2a2f3a;display:flex;align-items:center;gap:1rem}
+header h1{margin:0;font-size:1.2rem;color:#c0392b}
+main{padding:1.5rem 2rem;display:grid;gap:1.5rem}
+.card{background:#161a22;border:1px solid #2a2f3a;border-radius:8px;padding:1rem 1.2rem}
+.card h2{margin:.1rem 0 .8rem;font-size:1rem;color:#9aa3b2}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{border-bottom:1px solid #2a2f3a;padding:.45rem .6rem;text-align:left}
+th{color:#9aa3b2;font-weight:600}
+button{background:#2c3e50;color:#fff;border:none;border-radius:4px;padding:.3rem .7rem;cursor:pointer;font-size:.82rem;margin:.1rem}
+button:hover{background:#34495e}
+button.run{background:#c0392b}
+button.run:hover{background:#e74c3c}
+#output{white-space:pre-wrap;font-family:Consolas,monospace;font-size:.82rem;max-height:26rem;overflow:auto;background:#0f1115;border-radius:6px;padding:.8rem;border:1px solid #2a2f3a}
+.badge{display:inline-block;padding:.05rem .45rem;border-radius:1rem;font-size:.72rem;color:#fff}
+.high{background:#e74c3c}.critical{background:#c0392b}.medium{background:#e67e22}.low{background:#f39c12}.info{background:#7f8c8d}
+small{color:#6b7280}
+</style>
+</head>
+<body>
+<header><h1>Camty</h1><small>红队交战面板 · 断点续跑 · 全程审计</small></header>
+<main>
+  <section class="card">
+    <h2>交战列表</h2>
+    <table id="eng-table"><thead><tr><th>交战</th><th>场景包</th><th>阶段</th><th>发现</th><th>操作</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section class="card">
+    <h2>执行输出</h2>
+    <label><input type="checkbox" id="real-run"> 实际执行（默认 dry-run 预演）</label>
+    <div id="output">（选择交战与阶段后执行）</div>
+  </section>
+  <section class="card">
+    <h2>台账</h2>
+    <table id="ledger-table"><thead><tr><th>ID</th><th>类型</th><th>严重度</th><th>目标</th><th>详情</th><th>已验证</th></tr></thead><tbody></tbody></table>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function refresh() {
+  const data = await (await fetch('/api/engagements')).json();
+  const tb = $('#eng-table tbody');
+  tb.innerHTML = '';
+  for (const e of data) {
+    if (e.error) { tb.insertAdjacentHTML('beforeend', `<tr><td>${esc(e.name)}</td><td colspan="4">配置错误: ${esc(e.error)}</td></tr>`); continue; }
+    const phases = e.phases.map(p => `<button onclick="runPhase('${esc(e.name)}','${p.id}',false)">${esc(p.id)}</button>`).join(' ');
+    const reportBtn = `<a href="/api/engagements/${encodeURIComponent(e.name)}/report" target="_blank"><button>报告</button></a>`;
+    tb.insertAdjacentHTML('beforeend',
+      `<tr><td>${esc(e.name)}</td><td>${esc(e.pack_title)} <small>(${esc(e.pack)})</small></td><td>${phases}</td><td>${e.findings}</td><td>${reportBtn}</td></tr>`);
+  }
+}
+
+async function runPhase(name, phase) {
+  const real = $('#real-run').checked;
+  const out = $('#output');
+  out.textContent = `执行中: ${name} / ${phase}（${real ? '实际执行' : 'dry-run'}）...`;
+  const resp = await fetch(`/api/engagements/${encodeURIComponent(name)}/run/${phase}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({dry_run: !real})
+  });
+  const data = await resp.json();
+  out.textContent = JSON.stringify(data, null, 2);
+  loadLedger(name);
+}
+
+async function loadLedger(name) {
+  const data = await (await fetch(`/api/engagements/${encodeURIComponent(name)}/ledger`)).json();
+  const tb = $('#ledger-table tbody');
+  tb.innerHTML = (data.findings || []).map(f =>
+    `<tr><td>${esc(f.id)}</td><td>${esc(f.kind)}</td><td><span class="badge ${esc(f.severity)}">${esc(f.severity)}</span></td><td>${esc(f.target)}</td><td>${esc(f.detail)}</td><td>${f.verified ? '✓' : ''}</td></tr>`
+  ).join('') || '<tr><td colspan="6">（暂无发现）</td></tr>';
+}
+
+refresh();
+</script>
+</body>
+</html>

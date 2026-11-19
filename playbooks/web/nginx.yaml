@@ -1,0 +1,11 @@
+name: nginx-misconfig
+pack: ext-web
+match:
+  tech:
+    - Nginx
+actions:
+  - 敏感文件探测: /.git/config、/.svn/entries、/.env、/backup.zip、/.DS_Store
+  - 目录遍历: 开启 autoindex 的目录（找列目录入口）
+  - 错误页/自定义头: server_tokens 与 X-Powered-By 信息泄露面
+  - 已知 CVE 对照: 按版本查 Nginx CVE（如 CVE-2021-23017 resolver、CVE-2023-44487 HTTP/2 rapid reset）
+notes: 探测面先行，命中后按 nuclei tag（exposure/nginx）复验再进利用阶段

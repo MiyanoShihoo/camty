@@ -1,0 +1,11 @@
+name: struts2-surface
+pack: ext-web
+match:
+  tech:
+    - Struts
+    - Struts2
+actions:
+  - devMode: ?debug=command&expression=（旧版调试模式 OGNL）
+  - 已知 RCE 路由验证: S2-045（Content-Type OGNL）、S2-048、S2-057（验证回显，不执行系统命令）
+  - 版本指纹: /struts/webconsole.html、devMode 报错页
+notes: OGNL 验证用回显常量；执行命令属利用阶段，走门控与确认

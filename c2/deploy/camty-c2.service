@@ -1,0 +1,33 @@
+[Unit]
+Description=Camty C2 server (beacon endpoint + operator API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 凭据放 EnvironmentFile（0600），不要写进单元文件
+EnvironmentFile=/etc/camty/c2.env
+# beacon 端口公网可达；api 端口只绑回环，operator 走 SSH 隧道
+ExecStart=/usr/bin/python3 /opt/camty/c2/server/camty_c2.py \
+    --beacon-port ${CAMTY_BEACON_PORT} \
+    --api-port 127.0.0.1:${CAMTY_API_PORT} \
+    --bind 0.0.0.0 \
+    --beacon-path ${CAMTY_BEACON_PATH} \
+    --result-path ${CAMTY_RESULT_PATH} \
+    --beacon-ctype ${CAMTY_BEACON_CTYPE} \
+    --token ${CAMTY_TOKEN} \
+    --psk ${CAMTY_PSK} \
+    --ops-log /var/lib/camty/c2-ops.jsonl
+Restart=on-failure
+RestartSec=5
+User=camty
+Group=camty
+# 加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/camty
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

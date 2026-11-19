@@ -1,0 +1,12 @@
+# 战术手册：按命中特征注入 Agent 上下文（M3 做自动匹配，MVP 先人工查阅/引用）
+name: wordpress-attack-surface
+pack: ext-web
+match:
+  tech:
+    - WordPress
+actions:
+  - 版本泄露面: /readme.html、/?feed=rss2、meta generator
+  - 登录与枚举: /wp-login.php、/wp-json/wp/v2/users（REST 用户枚举）
+  - 插件/主题资产: /wp-content/plugins/<name>/ 与 /wp-content/themes/<name>/readme.txt
+  - XML-RPC: /xmlrpc.php 是否开放，system.listMethods 可作爆破放大
+notes: 所有动作先确认在交战 scope 内；插件版本命中后对照知识库 CVE 再决定是否进入验证阶段

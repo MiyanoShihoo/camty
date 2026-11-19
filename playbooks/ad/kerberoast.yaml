@@ -1,0 +1,14 @@
+# 战术手册：按命中特征注入 Agent 上下文（M3 做自动匹配，MVP 先人工查阅/引用）
+name: kerberoastable-service
+pack: int-ad
+match:
+  service:
+    - kerberoastable SPN
+  finding:
+    - kerberoastable
+actions:
+  - 前置条件: 需要至少一个有效域用户凭据（来源：台账 verified finding 或 operator 提供）
+  - 请求 SPN 的 TGS 票据并导出（impacket GetUserSPNs -request）
+  - 离线破解: hashcat -m 13100（或 john），优先目标内部弱口令模式
+  - 破解成功后: 只对 scope 内账号做密码复用验证，凭据入台账
+notes: 属凭据类动作，默认需要 operator 确认；喷洒速率受 scope.min_interval_seconds 约束

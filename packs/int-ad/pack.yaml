@@ -1,0 +1,51 @@
+name: int-ad
+title: 内网域渗透
+# 域账号等 operator 输入用 --var 注入，如：
+#   python -m camty run engagements/demo-int-ad.yaml --phase creds --var domain_user=test\a --var domain_pass='xxx'
+phases:
+  - id: discover
+    title: 内网探测
+    goal: 摸清授权网段内存活主机与开放服务
+    steps:
+      - adapter: fscan
+        args:
+          cidr: "{target_cidr}"
+  - id: enum
+    title: 域服务枚举
+    goal: SMB 签名/共享/会话枚举与可 roast SPN 清单
+    gate:
+      require_context: [live_hosts]
+    steps:
+      - adapter: smb-enum
+        args:
+          hosts: "{live_hosts}"
+  - id: creds
+    title: 凭据测试
+    goal: 授权范围内验证已知凭据（只验证，不喷洒不爆破）
+    gate:
+      min_verified_findings: 1
+    steps:
+      - adapter: cred-test
+        args:
+          hosts: "{live_hosts}"
+          domain_user: "{domain_user}"
+          domain_pass: "{domain_pass}"
+        confirm: true
+  - id: lateral
+    title: 横向移动
+    goal: 以已验证凭据在范围内单主机执行命令
+    gate:
+      min_verified_findings: 1
+    steps:
+      - adapter: lateral-move
+        args:
+          host: "{target_host}"
+          domain_user: "{domain_user}"
+          domain_pass: "{domain_pass}"
+          command: "{command}"
+        confirm: true
+  - id: evidence
+    title: 证据固化
+    goal: 生成阶段报告（台账 + 审计 + 证据索引）
+    steps:
+      - adapter: report

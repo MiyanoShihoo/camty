@@ -1,0 +1,11 @@
+name: jenkins-unauth-surface
+pack: ext-web
+match:
+  tech:
+    - Jenkins
+actions:
+  - 未授权入口: /script 控制台、/manage、/credentials/（部分旧版匿名可读）
+  - 任意文件读: CVE-2024-23897（CLI 接口参数拼接读文件）
+  - 凭据面: credentials.xml 与 master.key 泄露后离线解
+  - 插件清单: /pluginManager/installed 对照已知 RCE 插件 CVE
+notes: /script 控制台命中即等价 getshell 权限，直接进报告高危；凭据解密离线进行

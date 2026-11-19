@@ -1,0 +1,75 @@
+name: ext-web
+title: 外部 Web 打点
+phases:
+  - id: recon
+    title: 资产发现
+    goal: 摸清根域名的子域与存活 Web 资产，产出存活站点清单与技术栈指纹
+    steps:
+      - adapter: subfinder
+        args:
+          domain: "{root_domain}"
+      - adapter: httpx
+        args:
+          hosts: "{subdomains}"
+  - id: verify
+    title: 已知漏洞验证
+    goal: 对存活资产做只读指纹验证，将命中沉淀为 verified findings
+    gate:
+      require_context: [live_hosts]
+    steps:
+      - adapter: nuclei
+        args:
+          hosts: "{live_hosts}"
+          severity: medium
+  - id: inject
+    title: 注入测试
+    goal: 对存活资产疑似注入点做验证性测试（验证为止，不取数据）
+    gate:
+      require_context: [live_sites]
+    steps:
+      - adapter: sqli-probe      # 自研注入模块
+        args:
+          targets: "{live_sites}"
+        confirm: true
+  - id: exploit
+    title: 注入利用（数据提取）
+    goal: 经已验证注入点提取 version/user/database，证明数据访问能力
+    gate:
+      min_verified_findings: 1
+      require_context: [sqli_targets]
+    steps:
+      - adapter: sqli-exploit    # 利用执行模块（验证级）
+        args:
+          targets: "{sqli_targets}"
+        confirm: true
+  - id: evidence
+    title: 证据固化
+    goal: 生成交战报告
+    steps:
+      - adapter: report
+
+# 攻击树依赖图（camty auto --plan）：requires 支持 context key 与 "finding:模式串"；
+# 注入没验证出来时，利用分支自动剪枝；objective 达成提前收束
+plan:
+  - adapter: subfinder
+    args: {domain: "{root_domain}"}
+    provides: [subdomains]
+  - adapter: httpx
+    args: {hosts: "{subdomains}"}
+    requires: [subdomains]
+    provides: [live_hosts, live_sites, tech_map]
+  - adapter: nuclei
+    args: {hosts: "{live_hosts}", severity: medium}
+    requires: [live_hosts]
+    provides: [findings]
+  - adapter: sqli-probe
+    args: {targets: "{live_sites}"}
+    requires: [live_sites]
+    confirm: true
+    provides: [sqli_targets]
+  - adapter: sqli-exploit
+    args: {targets: "{sqli_targets}"}
+    requires: ["finding:sqli"]
+    confirm: true
+    provides: [access_proof, extracted]
+  - adapter: report

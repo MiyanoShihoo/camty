@@ -1,0 +1,11 @@
+name: gitlab-surface
+pack: ext-web
+match:
+  tech:
+    - GitLab
+actions:
+  - 版本指纹: /users/sign_in 页面与 help 页版本泄露
+  - 未授权注册: /users/sign_up 是否开放（账户创建属利用动作，需确认）
+  - 已知 CVE: CVE-2023-7028 密码重置接管、CVE-2024-0402 任意文件读（按版本）
+  - 仓库泄露: 公开 group/project 里的密钥类提交
+notes: 仓库里的密钥先验证有效性再入台账，不做横向使用

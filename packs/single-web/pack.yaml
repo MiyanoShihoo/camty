@@ -1,0 +1,29 @@
+name: single-web
+title: 单目标 Web 全链
+# 适用：授权单一 Web 目标（域白名单即范围，CF 源站隐藏场景跳过端口面）
+phases:
+  - id: probe
+    title: 存活与指纹
+    steps:
+      - adapter: httpx
+        args: {hosts: "{targets}"}
+  - id: verify
+    title: 已知漏洞验证
+    gate: {require_context: [live_hosts]}
+    steps:
+      - adapter: nuclei
+        args: {hosts: "{live_hosts}", severity: "info,low,medium,high,critical"}
+  - id: inject
+    title: 注入探测
+    gate: {require_context: [live_sites]}
+    steps:
+      - adapter: sqli-probe
+        args: {targets: "{live_sites}", delay: 0.5}
+        confirm: true
+  - id: exploit
+    title: 注入利用（数据提取）
+    gate: {min_verified_findings: 1, require_context: [sqli_targets]}
+    steps:
+      - adapter: sqli-exploit
+        args: {targets: "{sqli_targets}", delay: 0.5}
+        confirm: true
