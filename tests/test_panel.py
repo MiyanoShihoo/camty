@@ -510,9 +510,9 @@ class TestPanelXssHardening(unittest.TestCase):
         "(v.prompt_tokens||0).toLocaleString()": "计数",
         "(v.completion_tokens||0).toLocaleString()": "计数",
         "i": "索引（data-i 行序号，数组下标）",
-        # sev()：调用点入参已包 esc()，函数体插值的是已转义值
-        "sev(esc(f.severity))": "sev() 调用点，入参已 esc()",
-        "s": "sev() 内部插值，入参在全部调用点已 esc()",
+        # sev()：esc 已内移函数体（纵深防御），调用点直接传原始值
+        "sev(f.severity)": "sev() 调用点，函数体已内部 esc()",
+        "s": "sev() 内部插值，函数体 esc(s) 后再插值",
         # 行构造变量：所有单元格动态插值均 esc() 包裹后 join
         "findingRows": "行构造（内部动态插值已全 esc）",
         "assetRows": "行构造（内部动态插值已全 esc）",
@@ -529,7 +529,7 @@ class TestPanelXssHardening(unittest.TestCase):
         "f.disposal==='fixed' ? '<span style=\"color:#2ecc71\">已修复</span>' : '开放'": "静态字面量三元",
         ("r.verdict==='fixed' ? '<span style=\"color:#2ecc71\">已修复</span>' :"
          " r.verdict==='reproduced' ? '<span style=\"color:#e74c3c\">仍可复现</span>' : '无法确认'"): "静态字面量三元",
-        "colors[hit.kind]||'#fff'": "固定色板查表",
+        "Object.hasOwn(colors, hit.kind) ? colors[hit.kind] : '#fff'": "固定色板查表（Object.hasOwn 守卫原型链）",
     }
     # 期望清点：esc() 包裹处数 / 白名单命中处数（新增插值必须显式归类，防止漏包）
     # 当前清点：117 处插值 = 77 处 esc() + 40 处白名单（计数 20、sev 内部/调用点 4、

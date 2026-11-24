@@ -556,7 +556,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
   b.classList.add('active'); render();
 });
-function sev(s){ return `<span class="badge ${s}">${s}</span>`; }
+function sev(s){ s = esc(s); return `<span class="badge ${s}">${s}</span>`; }  // esc 内移：调用点漏包也不再裸插
 function toast(msg){ const box=$('#toast'); box.textContent=msg; box.style.display='block'; setTimeout(()=>box.style.display='none', 3000); }
 async function render(){
   if(!eng) return;
@@ -564,7 +564,7 @@ async function render(){
   const main = $('#main');
   if(tab==='dash'){
     const d = await api(engURL('/dashboard'));
-    const findingRows = (d.findings||[]).slice(0,15).map(f=>`<tr><td>${esc(f.id)}</td><td>${sev(esc(f.severity))}</td>
+    const findingRows = (d.findings||[]).slice(0,15).map(f=>`<tr><td>${esc(f.id)}</td><td>${sev(f.severity)}</td>
         <td>${esc(f.target)}</td><td>${esc(f.detail)}</td><td>${esc(f.verified?'✓':'—')}</td></tr>`).join('');
     const assetRows = Object.entries(d.assets.by_kind||{}).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v.total}</td><td>${v.tested}</td></tr>`).join('');
     const todoRows = (d.todolist||[]).map(t=>`<tr><td>${esc(t.item_id)}</td><td>${esc(t.status)}</td><td>${esc(t.title)}</td><td>${esc((t.depends_on||[]).join(','))}</td></tr>`).join('');
@@ -594,7 +594,7 @@ async function render(){
     if (session.status==='running') retestLine = '复测进行中（' + (session.finding_id||'') + '）…';
     else if (session.status==='error') retestLine = '复测失败：' + (session.error||'');
     else if (session.result) retestLine = '最近复测 [' + session.result.verdict + '] ' + session.result.finding_id + ': ' + (session.result.summary||'');
-    const findingRows = (d.findings||[]).map(f=>`<tr><td>${esc(f.id)}</td><td>${esc(f.kind)}</td><td>${sev(esc(f.severity))}</td>
+    const findingRows = (d.findings||[]).map(f=>`<tr><td>${esc(f.id)}</td><td>${esc(f.kind)}</td><td>${sev(f.severity)}</td>
       <td>${esc(f.target)}</td><td>${esc(f.detail)}</td><td>${esc((f.derived_from||[]).join('←'))}</td>
       <td>${esc(f.verified?'✓':'—')}</td>
       <td>${f.disposal==='fixed' ? '<span style="color:#2ecc71">已修复</span>' : '开放'}</td>
@@ -757,7 +757,7 @@ function renderFDG(tree){
       ctx.moveTo(nodes[s].x,nodes[s].y); ctx.lineTo(nodes[t2].x,nodes[t2].y); ctx.stroke(); });
     nodes.forEach(n=>{ n.x+=n.vx*0.85; n.y+=n.vy*0.85; n.vx*=0.85; n.vy*=0.85;
       ctx.beginPath(); ctx.arc(n.x,n.y, n.kind==='endpoint'?3:6, 0, 7);
-      ctx.fillStyle = colors[n.kind]||'#7f8c8d'; ctx.fill();
+      ctx.fillStyle = Object.hasOwn(colors, n.kind) ? colors[n.kind] : '#7f8c8d'; ctx.fill();
       if (n.tested){ ctx.strokeStyle='#2ecc71'; ctx.lineWidth=2; ctx.stroke(); ctx.lineWidth=1; } });
     fdgTimer = requestAnimationFrame(step);
   };
@@ -769,7 +769,7 @@ function renderFDG(tree){
     if (!hit){ document.getElementById('fdg-detail').innerHTML = ''; return; }
     const src = hit.source ? '· 来源 ' + hit.source : '';
     document.getElementById('fdg-detail').innerHTML =
-      `<b style="color:${colors[hit.kind]||'#fff'}">${esc(hit.kind)}</b> ${esc(hit.value)} ${esc(hit.tested?'✓ 已测':'○ 未测')} ${esc(src)}`;
+      `<b style="color:${Object.hasOwn(colors, hit.kind) ? colors[hit.kind] : '#fff'}">${esc(hit.kind)}</b> ${esc(hit.value)} ${esc(hit.tested?'✓ 已测':'○ 未测')} ${esc(src)}`;
   };
 }
 loadEngs().then(render);
