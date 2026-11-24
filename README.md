@@ -83,6 +83,20 @@ python -m camty audit engagements/my-target.yaml                 # 审计哈希�
 
 **多目标并行**：`python -m camty multi a.yaml b.yaml c.yaml` —— 每交战一进程，汇总结录。
 
+**交互式重放（Repeater）**：`python -m camty repeater engagements/my-target.yaml --port 8895` —— 手工验证向量时的提速器：持久会话（cookie 全程携带）、POST 前自动提取 csrf、向量批测一次打 N 条 payload 按指纹聚簇（只有异类簇需要人眼看）、`mode=browser` 走持久 stealth 浏览器（`render:true` 完整渲染，过反自动化客户端检测）。每个请求照过 scope 白名单 + 限速 + 审计哈希链三道闸。
+
+```bash
+# 单发：自动提取标题/表单/CSRF/错误标记，与该路径基线自动比对
+curl -X POST localhost:8895/req -H "Content-Type: application/json" \
+  -d '{"method":"GET","url":"https://target.example/"}'
+# 批测：N 条 payload 一次打完，返回基线簇 + 异类簇
+curl -X POST localhost:8895/vector -H "Content-Type: application/json" \
+  -d '{"url":"https://target.example/","param":"q","payloads":["a","b","c"]}'
+# POST 带 CSRF 自动跟随：auto_csrf 指向表单页即可
+curl -X POST localhost:8895/req -H "Content-Type: application/json" \
+  -d '{"method":"POST","url":"https://target.example/login","body":{"user":"x","pass":"y"},"auto_csrf":"https://target.example/login"}'
+```
+
 ## 交战纪律（引擎强制，不靠自觉）
 
 - 范围白名单外的目标一律拒绝（含 DNS 解析校验防"形似目标"）

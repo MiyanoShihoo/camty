@@ -139,6 +139,13 @@ def cmd_engine(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
+def cmd_repeater(args: argparse.Namespace) -> None:
+    """交互式请求重放守护（camty.repeater）。"""
+    from camty.repeater import main as repeater_main
+
+    repeater_main(args.engagement, port=args.port)
+
+
 def cmd_audit(args: argparse.Namespace) -> None:
     eng = Engagement(args.engagement)
     entries = eng.audit.entries()
@@ -258,6 +265,11 @@ def main(argv: list[str] | None = None) -> None:
     p_run.add_argument("--var", action="append", default=[], metavar="KEY=VALUE",
                         help="注入上下文变量（可多次），如 --var domain_user=test\\a")
     p_run.set_defaults(func=cmd_run)
+
+    p_rep = sub.add_parser("repeater", help="交互式请求重放守护：持久会话/CSRF 跟随/向量批测聚类")
+    p_rep.add_argument("engagement", help="交战配置 yaml 路径")
+    p_rep.add_argument("--port", type=int, default=8895, help="守护端口（默认 8895）")
+    p_rep.set_defaults(func=cmd_repeater)
 
     p_multi = sub.add_parser(
         "multi", help="多目标并行：每交战一个子进程跑 auto（同参数），汇总结果")

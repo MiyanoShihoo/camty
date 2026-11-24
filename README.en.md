@@ -78,6 +78,20 @@ python -m camty audit engagements/my-target.yaml                 # audit hash-ch
 
 **Multiple targets in parallel**: `python -m camty multi a.yaml b.yaml c.yaml`.
 
+**Interactive Repeater**: `python -m camty repeater engagements/my-target.yaml --port 8895` — a speed multiplier for manual vector verification: persistent session (cookies carried across requests), automatic csrf extraction before POSTs, batch vector testing (send N payloads in one call, responses clustered by fingerprint so only outlier clusters need human eyes), and `mode=browser` backed by a persistent stealth browser (`render:true` performs full page rendering, defeating anti-automation client detection). Every request still passes the three gates: scope whitelist, rate limiting, and the tamper-evident audit chain.
+
+```bash
+# Single request: auto-extracts title/forms/CSRF/error markers, auto-diffs against the path baseline
+curl -X POST localhost:8895/req -H "Content-Type: application/json" \
+  -d '{"method":"GET","url":"https://target.example/"}'
+# Batch vectors: N payloads in one call, returns baseline + outlier clusters
+curl -X POST localhost:8895/vector -H "Content-Type: application/json" \
+  -d '{"url":"https://target.example/","param":"q","payloads":["a","b","c"]}'
+# POST with automatic CSRF follow: point auto_csrf at the form page
+curl -X POST localhost:8895/req -H "Content-Type: application/json" \
+  -d '{"method":"POST","url":"https://target.example/login","body":{"user":"x","pass":"y"},"auto_csrf":"https://target.example/login"}'
+```
+
 ## Engagement Discipline (enforced by the engine)
 
 - Anything outside the scope whitelist is refused (DNS-resolution checked against look-alike domains)
