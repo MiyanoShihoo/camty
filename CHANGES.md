@@ -118,3 +118,41 @@
   - 环境事实修正：任务书"本机未安装 cryptography"与实际不符——cryptography 50.0.2 以 `--target` 方式装在仓库 `vendor/`，由 `camty/__init__.py`（CAMTY_NO_VENDOR=1 可禁用）自动挂载 sys.path；"无 cryptography 环境"对应 `CAMTY_NO_VENDOR=1`，实测该模式下 `TestVault` 按既有 skipUnless 跳过、本任务新增的 vault/hardening 用例全部通过，而 `TestC2EndToEnd` 整类在 setUpClass 失败为**既有行为**（C2 服务端协议层 protocol.py 硬性要求 cryptography，非本任务引入、超出本任务范围）。
 - 新增测试：`tests/test_vault_fallback.py` 共 6 个（test_fallback_requires_explicit_one / test_encrypt_refuses_without_cryptography / test_encrypt_plaintext_fallback_optin / test_plaintext_blob_roundtrip / test_decrypt_encrypted_blob_refuses_without_cryptography / test_real_crypto_unchanged——均用 mock 强制 `_fernet_cls` 为 None，装不装 cryptography 断言都成立，最后一个 skipUnless 守卫真实加密路径）；`tests/test_c2_hardening.py` `TestApiTokenCompare` 共 4 个（test_compare_digest_in_source / test_authorized_exact_match / test_authorized_rejects_variants / test_authorized_non_ascii_no_500）；`tests/test_c2_e2e.py` 新增 1 个真实服务端行为用例（test_api_rejects_missing_or_wrong_bearer：无 token / 错 token / 错前缀均 401）。
 - 全量测试：`python -m pytest tests/ -q` → 319 passed（308 + 新增 11，既有测试无失败）。
+
+## R2-P0 traffic.py socket 属性暂存（Python 3.13+ 崩溃源）
+- **任务**：`sock._camty_leftover` 在 Python 3.13+ 的 socket 对象（无 `__dict__`）上直接 AttributeError；本机实测复现（3.14.4 同样崩）。此缺陷潜伏的原因：仅在 `_recv_until` 单 chunk 过读越过 `\r\n\r\n` 时触发，既有 MITM E2E 未踩到该 chunk 边界。
+- **涉及文件**：camty/traffic.py、tests/test_artex_port.py（新增 TestTrafficLeftoverPlumbing）
+- **修复**：`_read_headers` 返回 `(headers, 过读尾部)`，`_read_body(sock, headers, leftover)` 显式收参——零隐藏状态，任意 Python 版本可移植。回归测试用真实 `socket.socketpair()` 复现旧代码必崩场景。
+- **测试**：+1；全量 326 passed（修复前该新测试对旧代码必失败）。
+
+## R2-P1 test_run_impacket_env 平台无关化
+- **任务**：与 test_vendor_root 同源问题——用例内仍用 Windows 字面量路径，Linux 上 PYTHONPATH 解析成无关目录断言失败。
+- **涉及文件**：tests/test_upgrades.py
+- **修复**：改平台原生临时目录路径构造，断言精确到 `base/vendor`。
+- **测试**：既有用例重写（断言语义保留），平台无关。
+
+## R2-P1 requirements.txt 补 cryptography
+- **任务**：fresh clone 缺 cryptography（vendor/ 不入库），C2/vault 相关功能在干净环境直接缺包失败。
+- **涉及文件**：requirements.txt
+- **修复**：`cryptography>=42` 入核心依赖（vendor/ 缓存副本仍保留，作者环境可离线）。
+
+## R2-P2 面板纵深防御：sev() 内移 esc + 色板查表守卫
+- **任务**：①sev() 函数体 `${s}` 裸插值（调用点已包 esc 但属防御单点）；②`colors[hit.kind]` 原型链取值（`kind="constructor"` 时取到函数对象串进 style 属性——不构成 XSS，属健壮性）。
+- **涉及文件**：camty/api/app.py、tests/test_panel.py
+- **修复**：esc 移入 sev() 函数体（调用点去外层 esc 防双重转义）；两处 colors 取值加 `Object.hasOwn` 守卫。守卫测试白名单同步：`sev(f.severity)`（函数体已内部 esc）、`Object.hasOwn(...)` 查表（守卫静态字面量），清点数字不变（117 = 77 esc + 40 白名单）。
+- **测试**：面板 24 全绿（清点守卫同步后）。
+
+## R2-P1 repeater TLS 回退静默降级
+- **任务**：repeater.py 的 urllib 回退路径无条件 `CERT_NONE`——缺 curl_cffi 的机器静默变成不验证证书，携会话 Cookie 的流量可被 MITM。
+- **涉及文件**：camty/repeater.py、tests/test_repeater.py
+- **修复**：回退路径默认走系统证书校验（不再自定义 HTTPSHandler）；curl_cffi 路径对称 `verify=not _tls_insecure()`；自签场景须显式 `CAMTY_TLS_INSECURE=1`，首次生效打 stderr 警告（进程内只打一次）。
+- **测试**：+2（默认关、显式开+警告一次性）。
+
+## R2-P1 repeater_api 六端点 fail-secure 鉴权
+- **任务**：/req /vector /seq /log /state /stop 零鉴权——本机任意进程可借用会话 Cookie 发请求、读 /log 历史。缓解因素（绑 127.0.0.1、scope.require、审计链）不足。
+- **涉及文件**：camty/repeater_api.py、tests/test_repeater.py
+- **修复**：复用面板 fail-secure 模式（`CAMTY_REPEATER_TOKEN` 优先，未设 `secrets.token_hex(16)` 生成 + stderr 打印，`hmac.compare_digest` 字节比较，Bearer + `?token=` 双通道，测试重置入口）。全端点生效；仓内无 HTTP 消费方，零破坏。
+- **测试**：+4（无 token 401 / 生成 token 200 含 ?token= 通道 / 错误 token 401 / 显式 env token）。
+
+## R2 全量测试结果
+- 319（上轮终态）→ **326 passed**（+7：回归 1 + TLS 2 + API 鉴权 4），零既有失败。
