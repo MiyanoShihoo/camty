@@ -68,7 +68,7 @@ sbox/轮常量由算法推导（GF(2⁸) 逆元 + 仿射 / xtime），非手抄�
 ## 5. v1 明确不做（边界）
 
 - 无持久化：进程消亡即掉线（重启靠 beacon 自动重注册，服务端会话自愈）
-- IV 来自 `rand()`（GetTickCount 播种）；v2 换 BCryptGenRandom
+- IV 与 beacon id 来自 CSPRNG：BCryptGenRandom（bcrypt.lib），运行失败或构建链不支持时退 RtlGenRandom（SystemFunction036，advapi32）；协议字节格式不变（magic|iv|ct|mac，IV 16 字节；id 仍为 `host-XXXX`）。jitter 仍用 `rand()`（非密码学用途）
 - 无规避层：正常 PE、CreateProcess、明文 PE 元数据
 - 无并发任务、无文件传输、无 socks（按需进 v2/v3）
 - 存储在内存 + JSONL 动作日志（c2-ops.jsonl，无哈希链；operator 侧审计在 camty 已有链）

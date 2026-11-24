@@ -29,6 +29,11 @@ void sha256(const uint8_t *data, size_t len, uint8_t out[32]);
 void hmac_sha256(const uint8_t *key, size_t key_len,
                  const uint8_t *msg, size_t msg_len, uint8_t out[32]);
 
+/* CSPRNG：优先 BCryptGenRandom（bcrypt.lib），失败退 SystemFunction036（advapi32）。
+ * 返回 0 成功；两种来源都失败返回 -1（调用方必须放弃本次操作，fail-closed）。
+ * 供 cmt1_seal 的 IV 与 beacon id 使用；jitter 等非密码学用途仍可用 rand()。 */
+int cmt1_random_bytes(uint8_t *buf, size_t n);
+
 /* CMT1 封装：magic|iv|ct|mac。out 容量需 in_len + 4 + 16 + 32。成功返回 0。 */
 int cmt1_seal(const uint8_t psk[CMT1_KEY_LEN],
               const uint8_t *plaintext, size_t pt_len,

