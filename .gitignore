@@ -32,3 +32,12 @@ usage.jsonl
 result.txt
 c2/implant/e2e-ops.jsonl
 # 本机交互便利变量不走仓库（README 说明 CAMTY_TOOLS_DIR 用法）
+# 工具缓存（ysoserial 等，按需自备不入库，jar 路径经 CAMTY_TOOLS_JAR 传入）
+tools/
+# 交战专属脚本（ps_ 前缀：一次性流程/目标相关，同 onyx_/wbssr_ 规矩不入库）
+scripts/ps_*.py
+# 运行态/一次性产物
+scripts/attack_state.json
+scripts/window_current.txt
+scripts/translet_cookie.txt
+scripts/translet_raw.bin
