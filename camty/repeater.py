@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import html as html_mod
 import json
+import os
 import queue
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -36,6 +38,25 @@ ERROR_MARKERS = [
     "sqlerror", "unclosed quotation", "you have an error in your sql",
 ]
 _SIZE_BUCKET = 64  # 体量聚类容差（字节）
+
+_tls_warned = False
+
+
+def _tls_insecure() -> bool:
+    """TLS 降级须显式 CAMTY_TLS_INSECURE=1。
+
+    urllib 回退路径默认保留系统证书校验——此前回退无条件 CERT_NONE，
+    缺 curl_cffi 的机器会静默变成不验证（携会话 Cookie 的流量可被 MITM）。
+    自签靶场确需关闭时用环境变量显式选择，且首次生效时打警告。
+    """
+    global _tls_warned
+    if os.environ.get("CAMTY_TLS_INSECURE", "") != "1":
+        return False
+    if not _tls_warned:
+        _tls_warned = True
+        print("[camty] CAMTY_TLS_INSECURE=1：TLS 证书校验已禁用（自签靶场显式选择，勿用于公网）",
+              file=sys.stderr)
+    return True
 
 
 def _analyze_html(body: str) -> dict:
@@ -109,7 +130,8 @@ class RepeaterSession:
             from curl_cffi import requests as cr
 
             r = cr.request(method, url, headers=hdrs, data=data, timeout=20,
-                           impersonate="chrome131", allow_redirects=False)
+                           impersonate="chrome131", allow_redirects=False,
+                           verify=not _tls_insecure())
             status, rh, text = r.status_code, dict(r.headers), r.text
         except ImportError:
             import ssl
@@ -117,12 +139,17 @@ class RepeaterSession:
 
             req = urllib.request.Request(url, data=data.encode() if data else None,
                                          headers=hdrs, method=method)
-            ctx = ssl.create_default_context()
-            ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+
             class _NoRedir(urllib.request.HTTPRedirectHandler):
                 def redirect_request(self, *a, **kw):  # noqa: N802
                     return None
-            opener = urllib.request.build_opener(_NoRedir, urllib.request.HTTPSHandler(context=ctx))
+            handlers = [_NoRedir]
+            # 默认走 urllib 系统证书校验（不带自定义 HTTPSHandler）；显式降级才关闭
+            if _tls_insecure():
+                ctx = ssl.create_default_context()
+                ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+                handlers.append(urllib.request.HTTPSHandler(context=ctx))
+            opener = urllib.request.build_opener(*handlers)
             try:
                 resp = opener.open(req, timeout=20)
                 status, rh, text = resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")

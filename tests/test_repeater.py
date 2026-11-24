@@ -193,5 +193,105 @@ class TestRepeater(unittest.TestCase):
         self.assertEqual(r["status"], 200)
 
 
+class TestRepeaterApiAuth(unittest.TestCase):
+    """/req /vector /seq /log /state /stop 全端点 fail-secure 鉴权。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from camty.agent.state import Engagement
+        from camty.repeater_api import build_app
+        from fastapi.testclient import TestClient
+
+        cls.build_app = staticmethod(build_app)
+        cls.TestClient = TestClient
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.cfg = _write_eng(Path(cls.tmp.name), "127.0.0.1")
+        cls.eng = Engagement(cls.cfg)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.eng.close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        from camty import repeater as rep_mod
+        from camty import repeater_api
+
+        self._rep_mod = rep_mod
+        repeater_api._reset_repeater_token_for_tests()
+        self._saved_env = repeater_api.os.environ.get("CAMTY_REPEATER_TOKEN")
+        repeater_api.os.environ.pop("CAMTY_REPEATER_TOKEN", None)
+        self.sess = RepeaterSession(self.eng)
+        self.client = self.TestClient(self.build_app(self.sess))
+
+    def tearDown(self):
+        self.sess.close()
+        if self._saved_env is not None:
+            repeater_api.os.environ["CAMTY_REPEATER_TOKEN"] = self._saved_env
+
+    def test_no_token_401(self):
+        r = self.client.get("/state")
+        self.assertEqual(r.status_code, 401)
+
+    def test_generated_token_200(self):
+        from camty import repeater_api
+
+        token = repeater_api._repeater_token()
+        r = self.client.get("/state", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(r.status_code, 200)
+        r2 = self.client.get(f"/state?token={token}")
+        self.assertEqual(r2.status_code, 200)  # ?token= 通道（脚本便利）
+
+    def test_wrong_token_401(self):
+        r = self.client.get("/state", headers={"Authorization": "Bearer deadbeef"})
+        self.assertEqual(r.status_code, 401)
+
+    def test_explicit_env_token(self):
+        from camty import repeater_api
+
+        repeater_api.os.environ["CAMTY_REPEATER_TOKEN"] = "explicit-token-1"
+        try:
+            r = self.client.get("/state", headers={"Authorization": "Bearer explicit-token-1"})
+            self.assertEqual(r.status_code, 200)
+            r2 = self.client.get("/state", headers={"Authorization": "Bearer other"})
+            self.assertEqual(r2.status_code, 401)
+        finally:
+            repeater_api.os.environ.pop("CAMTY_REPEATER_TOKEN", None)
+
+
+class TestTlsInsecureSwitch(unittest.TestCase):
+    """TLS 降级开关：默认关（保留证书校验），显式 CAMTY_TLS_INSECURE=1 才开。"""
+
+    def setUp(self):
+        from camty import repeater as rep_mod
+
+        self._saved = rep_mod.os.environ.get("CAMTY_TLS_INSECURE")
+        rep_mod.os.environ.pop("CAMTY_TLS_INSECURE", None)
+        rep_mod._tls_warned = False
+        self._mod = rep_mod
+
+    def tearDown(self):
+        if self._saved is not None:
+            self._mod.os.environ["CAMTY_TLS_INSECURE"] = self._saved
+        else:
+            self._mod.os.environ.pop("CAMTY_TLS_INSECURE", None)
+
+    def test_default_secure(self):
+        self.assertFalse(self._mod._tls_insecure())
+
+    def test_explicit_opt_in(self):
+        import contextlib
+        import io
+
+        self._mod.os.environ["CAMTY_TLS_INSECURE"] = "1"
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertTrue(self._mod._tls_insecure())  # 首次触发打警告
+            self.assertTrue(self._mod._tls_insecure())  # 二次不再重复
+        self.assertIn("TLS 证书校验已禁用", buf.getvalue())
+        self.assertEqual(buf.getvalue().count("TLS 证书校验已禁用"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
