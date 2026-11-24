@@ -215,8 +215,12 @@ class TestResponsesProtocol(unittest.TestCase):
             router.providers["oai"] = ProviderConfig(
                 "oai", "responses", "https://api.openai.com/v1", "sk-x", {"decide": "gpt-4.1"}
             )
-            with mock.patch("urllib.request.urlopen", return_value=FakeHTTPResponse(body)):
+            # _post 优先走 http_fp.fetch（curl_cffi），mock 必须打到同一入口，
+            # 否则 mock 不生效、测试用假 key 真实发起 HTTP（返回值约定：(text, status)）。
+            with mock.patch("camty.modules.http_fp.fetch",
+                            return_value=(json.dumps(body), 200)) as fake_fetch:
                 out = router.chat("decide", [{"role": "user", "content": "go"}])
+        fake_fetch.assert_called_once()
         self.assertEqual(out["tool_calls"][0]["name"], "subfinder")
         self.assertEqual(out["tool_calls"][0]["arguments"], {"domain": "example.com"})
 

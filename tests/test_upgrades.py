@@ -156,7 +156,15 @@ class TestImpacketAdapters(unittest.TestCase):
             self.assertTrue(REGISTRY[name].requires_finding, name)
 
     def test_vendor_root(self):
-        self.assertTrue(_vendor_root(r"E:\x\vendor\bin\GetNPUsers.py").endswith("vendor"))
+        # 用平台原生分隔符构造路径断言——Path.resolve 解析不了跨平台字面量
+        # （Windows 反斜杠路径在 Linux 上被当作单个文件名，历史版本因此误报）。
+        import os
+        import tempfile
+        from pathlib import Path
+
+        base = Path(tempfile.mkdtemp()).resolve()
+        script = str(base / "vendor" / "bin" / "GetNPUsers.py")
+        self.assertEqual(_vendor_root(script), str(base / "vendor"))
 
     def test_run_impacket_env(self):
         captured = {}

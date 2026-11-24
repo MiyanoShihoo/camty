@@ -2,6 +2,10 @@
 
 行为：注册 → 领任务 → 执行（本地 subprocess）→ 回传结果，循环直至 stop 事件。
 真实 C 植入体（implant/beacon.c）实现同一协议，二者可互换对拍。
+
+⚠ 仅用于本机/CI 联调：任务执行走 shell=True（模拟真实植入体的 shell 语义），
+  会把 C2 下发的任意命令当 shell 执行。不要部署到生产或对外可达环境；
+  生产植入体是 C 版（implant/），没有这层通用 shell 执行面。
 """
 
 from __future__ import annotations
@@ -63,6 +67,7 @@ class FakeBeacon:
             command = task.get("args", {}).get("command", "")
             self.executed.append(command)
             try:
+                # ⚠ shell=True 是测试替身语义（模拟真实植入体 shell），仅限本机/CI；勿对外部署
                 proc = subprocess.run(
                     command, shell=True, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=60,
