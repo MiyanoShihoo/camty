@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 import secrets
 import sys
@@ -34,6 +35,10 @@ app = FastAPI(title="Camty", version="0.3.0")
 _ENGAGEMENTS: dict[str, Engagement] = {}
 _ENGINE_STATE: dict[str, dict] = {}
 _RETEST_STATE: dict[str, dict] = {}
+# P2-9：check-then-act（检查 running + 置 running）与终态写入同锁完成，
+# 并发 POST 仅一个进入；后台执行仍用 threading.Thread（Engine.run 是阻塞同步代码）。
+_ENGINE_LOCK = threading.Lock()
+_RETEST_LOCK = threading.Lock()
 
 _GENERATED_PANEL_TOKEN: str | None = None
 
@@ -150,6 +155,7 @@ def list_engagements():
                 }
             )
         except Exception as exc:  # noqa: BLE001 - 单个坏配置不拖垮面板
+            logging.exception("面板加载交战配置失败: %s", path.stem)
             out.append({"name": path.stem, "error": str(exc)})
     return out
 
@@ -196,13 +202,14 @@ def run_phase(name: str, phase: str, req: RunRequest):
 def start_engine(name: str, req: EngineRequest):
     """后台线程启动多 agent 引擎，状态经 dashboard 轮询。"""
     eng = _engagement(name)
-    if _ENGINE_STATE.get(name, {}).get("status") == "running":
-        return {"status": "already-running"}
+    with _ENGINE_LOCK:  # 锁内完成"检查 running + 置 running"，并发仅一个进入
+        if _ENGINE_STATE.get(name, {}).get("status") == "running":
+            return {"status": "already-running"}
+        _ENGINE_STATE[name] = {"status": "running"}
     eng.context.update(req.vars)
 
     def _run():
         proxy = None
-        _ENGINE_STATE[name] = {"status": "running"}
         try:
             from camty.llm.router import LLMRouter
 
@@ -214,9 +221,12 @@ def start_engine(name: str, req: EngineRequest):
             ok = Engine(eng, router=router, n_workers=req.workers,
                         max_total_steps=req.budget).run()
             eng.save_state()
-            _ENGINE_STATE[name] = {"status": "done" if ok else "stopped"}
+            with _ENGINE_LOCK:
+                _ENGINE_STATE[name] = {"status": "done" if ok else "stopped"}
         except Exception as exc:  # noqa: BLE001
-            _ENGINE_STATE[name] = {"status": "error", "error": str(exc)[:300]}
+            logging.exception("面板引擎后台执行失败: %s", name)
+            with _ENGINE_LOCK:
+                _ENGINE_STATE[name] = {"status": "error", "error": str(exc)[:300]}
         finally:
             if proxy:
                 proxy.stop()
@@ -260,19 +270,23 @@ def start_retest(name: str, req: RetestRequest):
     known = {f.id for f in eng.ledger.findings}
     if req.finding_id not in known:
         raise HTTPException(400, f"台账无 finding {req.finding_id}")
-    if _RETEST_STATE.get(name, {}).get("status") == "running":
-        return {"status": "already-running"}
+    with _RETEST_LOCK:  # 锁内完成"检查 running + 置 running"，并发仅一个进入
+        if _RETEST_STATE.get(name, {}).get("status") == "running":
+            return {"status": "already-running"}
+        _RETEST_STATE[name] = {"status": "running", "finding_id": req.finding_id}
 
     def _run():
         from camty.agent.retester import run_retest
         from camty.llm.router import LLMRouter
 
-        _RETEST_STATE[name] = {"status": "running", "finding_id": req.finding_id}
         try:
             result = run_retest(eng, LLMRouter(), req.finding_id, note=req.note)
-            _RETEST_STATE[name] = {"status": "done", "result": result}
+            with _RETEST_LOCK:
+                _RETEST_STATE[name] = {"status": "done", "result": result}
         except Exception as exc:  # noqa: BLE001
-            _RETEST_STATE[name] = {"status": "error", "error": str(exc)[:300]}
+            logging.exception("面板复测后台执行失败: %s（finding %s）", name, req.finding_id)
+            with _RETEST_LOCK:
+                _RETEST_STATE[name] = {"status": "error", "error": str(exc)[:300]}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "finding_id": req.finding_id}
@@ -327,6 +341,7 @@ def ask_question(name: str, req: AskRequest):
     try:
         answer = answer_question(eng, LLMRouter(), req.question)
     except Exception as exc:  # noqa: BLE001 - LLM 未配置等给出可读错误
+        logging.exception("面板侧问失败: %s", name)
         raise HTTPException(503, f"侧问失败: {exc}") from exc
     return {"answer": answer}
 

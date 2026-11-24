@@ -56,3 +56,14 @@
   - README.md / README.en.md 面板说明补一句 token 行为（未设置时自动生成随机 token 并打印到 stderr，设置后用指定值）。
 - 新增测试：`tests/test_panel.py` 新增 `TestPanelAuthFailSecure` 共 5 个（test_unset_env_generates_token_and_blocks_unauthenticated / test_non_ascii_token_rejected_not_500 / test_token_reused_and_env_precedence / test_generation_prints_token_to_stderr / test_uses_constant_time_compare），另重写 1 个既有 fail-open 断言（见上）；修复前 5 个新增用例按预期失败复现问题（无 token 请求得 200、无单例生成、无 stderr 提示、无常时比较）。纯标准库（secrets/hmac），无真实网络。
 - 全量测试：`python -m pytest tests/ -q` → 293 passed（P0-2 后 288 + 新增 5，既有测试无失败；`tests/test_sidequestion.py` 3 个用例仅同步鉴权管道后继续通过）。
+
+## P2-9 面板日志与并发状态
+
+- 任务号：P2-9
+- 涉及文件：`camty/api/app.py`、`tests/test_panel.py`
+- 变更摘要：
+  - `_ENGINE_STATE`/`_RETEST_STATE` 的 check-then-act（检查 running + 置 running）改为在模块级 `threading.Lock`（`_ENGINE_LOCK`/`_RETEST_LOCK`）内原子完成，并发 POST 仅一个进入（原先 running 由后台线程置位，存在多 caller 同时通过检查的双开窗口）；后台执行保留 `threading.Thread`（`Engine.run` 是阻塞同步代码，不能改 asyncio.create_task）；引擎/复测的终态写入（done/stopped/error）同样在锁内完成；
+  - `app.py` 四处宽泛 `except Exception`（list_engagements 坏配置、start_engine/start_retest 后台失败、ask_question LLM 失败）补 `logging.exception`（根 logger，带完整异常栈），返回行为全部不变；
+  - 面板行为不变项：dashboard/SSE 读状态、already-running 返回值、错误态 error 字段截断 300 字符，均保持原样。
+- 新增测试：`tests/test_panel.py` 新增 `TestPanelConcurrencyAndLogging` 共 4 个（test_concurrent_engine_start_single_entry / test_concurrent_retest_single_entry / test_engine_error_logged_with_exception / test_all_broad_excepts_log）；修复前并发两用例（8 线程在 `_engagement` 入口对齐后同时进 handler）稳定复现竞态——全部 "started"、双开引擎/复测会话；修复后仅 1 个 "started"、其余 7 个 "already-running"（既有 check-then-act 竞态在裸跑下靠 GIL 时序多数轮侥幸不触发，测试用入口对齐消除该不确定性）。日志断言用 `assertLogs` 验证引擎失败栈被记录，静态断言验证全部 4 处宽泛 except 均含 `logging.exception`。无真实网络、无新依赖。
+- 全量测试：`python -m pytest tests/ -q` → 297 passed（P0-3 后 293 + 新增 4，既有测试无失败）。

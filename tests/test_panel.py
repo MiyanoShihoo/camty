@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -257,6 +258,152 @@ class TestPanelAuthFailSecure(unittest.TestCase):
         src = inspect.getsource(self.app_mod)
         self.assertIn("hmac.compare_digest", src)
         self.assertNotIn("supplied != token", src)
+
+
+class TestPanelConcurrencyAndLogging(unittest.TestCase):
+    """P2-9：engine/retest 的 check-then-act 用模块级锁保护（并发只允许一个进入），
+    宽泛 except 补 logging.exception（不改变返回行为）。保留 threading.Thread。"""
+
+    N_CALLERS = 8
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self.eng = make_eng(self.tmp)
+        os.environ["CAMTY_VAULT"] = str(Path(self.tmp) / "keys.json")
+        from camty.api import app as app_mod
+
+        app_mod._ENGAGEMENTS[self.eng.name] = self.eng
+        app_mod._ENGINE_STATE.pop(self.eng.name, None)
+        app_mod._RETEST_STATE.pop(self.eng.name, None)
+        self.app_mod = app_mod
+
+    def tearDown(self):
+        self.app_mod._ENGAGEMENTS.pop(self.eng.name, None)
+        self.app_mod._ENGINE_STATE.pop(self.eng.name, None)
+        self.app_mod._RETEST_STATE.pop(self.eng.name, None)
+
+    def _run_concurrent(self, invoke):
+        """N 个线程同时调用 invoke；在进入 handler 的公共入口（_engagement）处对齐，
+        返回结果列表。修复前：8 个全过检查（无人置 running）→ 多个 started；
+        修复后：锁内 check+set 原子化，仅 1 个 started。"""
+        import time as _time
+
+        gate = threading.Event()
+        results: list[str] = []
+        lock = threading.Lock()
+        orig_engagement = self.app_mod._engagement
+
+        def gated_engagement(name):
+            gate.wait(timeout=3)
+            return orig_engagement(name)
+
+        def caller():
+            status = invoke()["status"]
+            with lock:
+                results.append(status)
+
+        threads = [threading.Thread(target=caller) for _ in range(self.N_CALLERS)]
+        with mock.patch.object(self.app_mod, "_engagement", gated_engagement):
+            for t in threads:
+                t.start()
+            _time.sleep(0.5)  # 等全部调用者对齐在 gate 上（此时无人置 running）
+            gate.set()
+            for t in threads:
+                t.join(timeout=15)
+        return results
+
+    def test_concurrent_engine_start_single_entry(self):
+        from camty.api.app import EngineRequest
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockingEngine:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self):
+                entered.set()
+                release.wait(timeout=10)  # 卡住 "running" 窗口，暴露 check-then-act 竞态
+                return True
+
+        self.eng.save_state = lambda: None  # 测试不落盘
+        with mock.patch.object(self.app_mod, "Engine", _BlockingEngine):
+            results = self._run_concurrent(
+                lambda: self.app_mod.start_engine(self.eng.name, EngineRequest()))
+        try:
+            self.assertEqual(sorted(results),
+                             ["already-running"] * (self.N_CALLERS - 1) + ["started"])
+            self.assertTrue(entered.wait(timeout=5), "引擎应被唯一放行方启动")
+        finally:
+            release.set()
+
+    def test_concurrent_retest_single_entry(self):
+        from camty.api.app import RetestRequest
+
+        self.eng.ledger.add(kind="vuln", target="https://a.example.com/api",
+                            detail="d", severity="high", verified=True)
+        fid = self.eng.ledger.findings[0].id
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fake_run_retest(eng, router, finding_id, note=""):
+            entered.set()
+            release.wait(timeout=10)
+            return {"verdict": "fixed", "finding_id": finding_id, "summary": ""}
+
+        with mock.patch("camty.agent.retester.run_retest", side_effect=fake_run_retest):
+            results = self._run_concurrent(
+                lambda: self.app_mod.start_retest(
+                    self.eng.name, RetestRequest(finding_id=fid, note="")))
+        try:
+            self.assertEqual(sorted(results),
+                             ["already-running"] * (self.N_CALLERS - 1) + ["started"])
+            self.assertTrue(entered.wait(timeout=5), "复测应被唯一放行方启动")
+        finally:
+            release.set()
+
+    def test_engine_error_logged_with_exception(self):
+        import time as _time
+
+        from camty.api.app import EngineRequest
+
+        class _BoomEngine:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self):
+                raise RuntimeError("boom")
+
+        self.eng.save_state = lambda: None
+        with mock.patch.object(self.app_mod, "Engine", _BoomEngine):
+            with self.assertLogs(level="ERROR") as captured:
+                status = self.app_mod.start_engine(self.eng.name, EngineRequest())
+                self.assertEqual(status["status"], "started")
+                for _ in range(200):
+                    if (self.app_mod._ENGINE_STATE.get(self.eng.name, {})
+                            .get("status") == "error"):
+                        break
+                    _time.sleep(0.05)
+        state = self.app_mod._ENGINE_STATE[self.eng.name]
+        self.assertEqual(state["status"], "error")  # 返回行为不变
+        self.assertIn("boom", state["error"])
+        self.assertTrue(any("boom" in (rec.exc_text or "") for rec in captured.records),
+                        "宽泛 except 应记录完整异常栈")
+
+    def test_all_broad_excepts_log(self):
+        import inspect
+        import re as _re
+
+        src = inspect.getsource(self.app_mod)
+        sites = list(_re.finditer(r"except Exception[^\n]*:", src))
+        self.assertGreaterEqual(len(sites), 4)  # list_engagements/engine/retest/ask 四处
+        for m in sites:
+            window = src[m.end():m.end() + 400]
+            self.assertIn("logging.exception", window,
+                          f"宽泛 except 缺 logging.exception: {src[m.start():m.end()]}")
 
 
 # ---- P0-2 面板存储型 XSS（目标 → 操作员）----
