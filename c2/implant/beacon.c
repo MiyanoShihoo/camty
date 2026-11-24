@@ -230,8 +230,12 @@ static int http_post(const char *path, const uint8_t *body, size_t body_len,
     if (status == 200) {
         DWORD avail = 0;
         while (total + 1 < resp_max && WinHttpQueryDataAvailable(req, &avail) && avail) {
+            size_t room = resp_max - total - 1;  /* 预留 1 字节供调用方 NUL 终止 */
+            if (room == 0) break;
+            DWORD to_read = (DWORD)room;         /* 关键：请求量钳制到剩余空间 */
+            if (avail < to_read) to_read = avail;
             DWORD read_n = 0;
-            if (!WinHttpReadData(req, (LPVOID)(resp + total), avail, &read_n) || read_n == 0)
+            if (!WinHttpReadData(req, (LPVOID)(resp + total), to_read, &read_n) || read_n == 0)
                 break;
             total += read_n;
         }

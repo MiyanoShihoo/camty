@@ -67,3 +67,15 @@
   - 面板行为不变项：dashboard/SSE 读状态、already-running 返回值、错误态 error 字段截断 300 字符，均保持原样。
 - 新增测试：`tests/test_panel.py` 新增 `TestPanelConcurrencyAndLogging` 共 4 个（test_concurrent_engine_start_single_entry / test_concurrent_retest_single_entry / test_engine_error_logged_with_exception / test_all_broad_excepts_log）；修复前并发两用例（8 线程在 `_engagement` 入口对齐后同时进 handler）稳定复现竞态——全部 "started"、双开引擎/复测会话；修复后仅 1 个 "started"、其余 7 个 "already-running"（既有 check-then-act 竞态在裸跑下靠 GIL 时序多数轮侥幸不触发，测试用入口对齐消除该不确定性）。日志断言用 `assertLogs` 验证引擎失败栈被记录，静态断言验证全部 4 处宽泛 except 均含 `logging.exception`。无真实网络、无新依赖。
 - 全量测试：`python -m pytest tests/ -q` → 297 passed（P0-3 后 293 + 新增 4，既有测试无失败）。
+
+## P1-5 beacon.c HTTP 响应读取堆溢出
+
+- 任务号：P1-5
+- 涉及文件：`c2/implant/beacon.c`（`http_post` 响应循环）
+- 变更摘要：
+  - 漏洞：`WinHttpQueryDataAvailable` 返回的 `avail` 直接作为 `WinHttpReadData` 的请求字节数写入 `resp + total`，未钳制到缓冲剩余空间（`resp_max - total - 1`）。响应体超过 `HTTP_BUF_MAX`(256KB) 时（恶意/被劫持 C2、反代异常响应），`total` 接近 `resp_max` 的最后一次读取越界写堆；
+  - 修复：读取量钳制 `to_read = min(avail, (DWORD)(resp_max - total - 1))`（预留 1 字节），`WinHttpReadData` 传 `to_read`，剩余空间 `room` 为 0 时 break；截断的响应随后经 `cmt1_open` MAC 校验必然失败（fail-closed），协议字节格式零改动；
+  - 可运行 PoC（本机）：用 `#include` 方式把真实 `http_post` 编进独立 harness，响应缓冲改用 `VirtualAlloc(262144)`（恰好 64 页，越界即撞未映射页）；本地起 1MB 响应的 HTTP 服务端对拍：修复前（HEAD 源码）harness 稳定 `Segmentation fault`，修复后 `survived: http_post rc=0 resp_len=262143`；另用旧/新源码各编完整 beacon.exe 实跑对拍确认修复版在超长响应下持续存活且行为正常；
+  - 验证边界说明：Linux CI 无法编译 Win32 目标，本项无 pytest 用例；本机 zig cc（build.ps1 同一工具链）编译零警告通过，并用修复后源码重建 `c2/implant/beacon.exe`（未跟踪产物，不入库）跑通真实 E2E（`tests/test_c2_implant.py` 2 passed）。Windows 构建/E2E 流程不变。
+- 新增测试：无 pytest 新增（C 侧代码，CI 无法编译；验证方式见上——本地编译 + VirtualAlloc 边界 harness PoC + 真实 E2E）。
+- 全量测试：`python -m pytest tests/ -q` → 297 passed（基线 297，既有测试无失败；其中 `tests/test_c2_implant.py` 已切换为运行修复后源码构建的 beacon.exe）。
