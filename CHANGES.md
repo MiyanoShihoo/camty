@@ -28,3 +28,18 @@
   - JSONL 协议仅新增字段（seq/hmac），旧格式文件读入、续链、校验全部兼容。
 - 新增测试：`tests/test_audit_chain.py` 共 16 个（TestTailTruncationAnchor 2、TestSeqContinuity 3、TestHmacKey 5、TestStateAnchorTable 2、EngagementFixture 锚定/报告/CLI 4）；修复前 15 个用例按预期失败复现问题（1 个为无 key 兼容性回归守卫，修复前后均应通过）。测试无真实网络、无新依赖（HMAC 用标准库 hmac/hashlib）。
 - 全量测试：`python -m pytest tests/ -q` → 283 passed（P0-1 后 267 + 新增 16，既有测试无失败）。
+
+## P0-2 面板存储型 XSS（目标 → 操作员）
+
+- 任务号：P0-2
+- 涉及文件：`camty/api/app.py`、`tests/test_panel.py`
+- 变更摘要：
+  - 内嵌单页 `_PAGE` 新增 JS `esc()`（转义 `& < > " '`），全部动态插值改为 `${esc(...)}` 包裹：finding/traffic/graph/todo/activity/usage 各字段、`JSON.stringify(...)` 结果、`.slice(...)` 截断文本、`sev()` 入参、`data-*` 属性值、fdg-detail、SSE live-activity、toast 等；恶意目标返回的 `resp_body/req_body` 不再能注入 `<img onerror>` 之类窃取面板 token；
+  - 行构造（findings/资产/todolist/复测记录/流量行等）改为先拼装行 HTML 再插入模板，变量插入点与 sev 内部插值在测试白名单中逐个列明（详见 `tests/test_panel.py` `WHITELIST`，含分类注释）；
+  - URL 构造（`/api/engagements/${eng}/...`）改用 `engURL()` 助手 + `encodeURIComponent(eng)`（HTML 转义会破坏 URL 语义，故改连接方式消除插值；SSE `?token=` 同样 `encodeURIComponent`）；
+  - toast/steer/引擎提示全部改 `textContent` + 字符串拼接（textContent 本身是安全 sink，拼接避免无谓插值）；
+  - token 存储 `localStorage` → `sessionStorage`（同步 `api()` 读取、401 写入、EventSource URL 构造 3 处），关掉 XSS 偷 token 后的持久化窗口；
+  - `<head>` 增加 `<meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'; frame-ancestors 'none'">`（按规格不加 script-src，避免破坏内联脚本）；
+  - 静态模板 HTML 结构未改动；JSONL/协议无改动。
+- 新增测试：`tests/test_panel.py` 新增 `TestPanelXssHardening` 共 5 个（test_no_bare_interpolations / test_interpolation_inventory / test_esc_escapes_xss_payload / test_csp_meta_present / test_token_storage_moved_to_session_storage）；修复前 5 个全部按预期失败复现问题。插值静态断言：花括号配平提取 `_PAGE` 全部 `${...}`（含嵌套模板，共 117 处）＝ 77 处 `esc(` 包裹 + 40 处显式白名单（计数/索引 20、sev 内部与调用点 4、行构造变量 13、静态字面量三元/查表 3，测试内逐个列明原因）。esc 单测从 `_PAGE` 中提取真实映射表并应用到 `</pre><img src=x onerror=alert(1)>`，断言转义后不含 `<img`。纯标准库，无真实网络。
+- 全量测试：`python -m pytest tests/ -q` → 288 passed（基线 283 + 新增 5，既有测试无失败）。

@@ -1,4 +1,4 @@
-"""面板工程测试：LLM 用量记账 + Bearer 鉴权 + SSE 活动流。"""
+"""面板工程测试：LLM 用量记账 + Bearer 鉴权 + SSE 活动流 + XSS 加固。"""
 
 from __future__ import annotations
 
@@ -151,6 +151,191 @@ class TestPanelAuthAndSSE(unittest.TestCase):
         self.assertEqual(len(payload["activity"]), 1)
         self.assertEqual(payload["activity"][0]["tool"], "nuclei")
         self.assertIn("engine", payload["state"])
+
+
+# ---- P0-2 面板存储型 XSS（目标 → 操作员）----
+
+
+def _panel_page() -> str:
+    from camty.api import app as app_mod
+
+    return app_mod._PAGE
+
+
+def _scan_template(src: str, start: int, sink: list) -> int:
+    """start 指向模板字面量的开反引号；收集其中每个 ${...}（嵌套模板递归收集），
+    返回配对闭合反引号的索引。"""
+    i, n = start + 1, len(src)
+    while i < n:
+        c = src[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            return i
+        if c == "$" and i + 1 < n and src[i + 1] == "{":
+            depth, j = 1, i + 2
+            while j < n:
+                cj = src[j]
+                if cj == "\\":
+                    j += 2
+                    continue
+                if cj == "{":
+                    depth += 1
+                elif cj == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif cj == "`":
+                    j = _scan_template(src, j, sink)
+                    continue
+                j += 1
+            sink.append(src[i + 2:j])
+            i = j + 1
+            continue
+        i += 1
+    return n
+
+
+def _extract_interpolations(src: str) -> list[str]:
+    """提取 _PAGE 中 JS 模板字面量里的全部 ${...} 插值原文（含嵌套模板内部）。"""
+    sink: list[str] = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            i = _scan_template(src, i, sink) + 1
+            continue
+        i += 1
+    return sink
+
+
+def _extract_esc_body(page: str) -> str:
+    """提取 _PAGE 中 esc() 函数体（花括号配平）。"""
+    start = page.index("function esc(")
+    brace = page.index("{", start)
+    depth, i = 1, brace + 1
+    while depth and i < len(page):
+        if page[i] == "{":
+            depth += 1
+        elif page[i] == "}":
+            depth -= 1
+        elif page[i] == "`":
+            i = page.index("`", i + 1)
+        i += 1
+    return page[brace:i]
+
+
+class TestPanelXssHardening(unittest.TestCase):
+    """P0-2：_PAGE 全部动态插值必须 esc() 包裹或显式白名单；token 改 sessionStorage；CSP 元标签。"""
+
+    # 显式白名单：逐个列明每处保留原因（插值原文 → 原因）。
+    # 除计数/长度外，仅两类额外豁免：行构造变量（内部动态插值全部 esc()）、
+    # 静态字面量三元/查表（分支均为字面量，无动态数据）。
+    WHITELIST: dict[str, str] = {
+        # 纯计数/长度/索引（数字，无注入面）
+        "d.findings.length": "计数",
+        "v.total": "计数",
+        "v.tested": "计数",
+        "d.traffic.requests": "计数",
+        "Object.keys(d.traffic.hosts||{}).length": "计数",
+        "(rt.records||[]).length": "计数",
+        "(d.coverage.tested||0)": "计数",
+        "d.coverage.total||0": "计数",
+        "d.total||0": "计数",
+        "(d.nodes||[]).length": "计数",
+        "(d.edges||[]).length": "计数",
+        "t.calls||0": "计数",
+        "t.errors||0": "计数",
+        "(t.prompt_tokens||0).toLocaleString()": "计数",
+        "(t.completion_tokens||0).toLocaleString()": "计数",
+        "v.calls": "计数",
+        "v.errors": "计数",
+        "(v.prompt_tokens||0).toLocaleString()": "计数",
+        "(v.completion_tokens||0).toLocaleString()": "计数",
+        "i": "索引（data-i 行序号，数组下标）",
+        # sev()：调用点入参已包 esc()，函数体插值的是已转义值
+        "sev(esc(f.severity))": "sev() 调用点，入参已 esc()",
+        "s": "sev() 内部插值，入参在全部调用点已 esc()",
+        # 行构造变量：所有单元格动态插值均 esc() 包裹后 join
+        "findingRows": "行构造（内部动态插值已全 esc）",
+        "assetRows": "行构造（内部动态插值已全 esc）",
+        "todoRows": "行构造（内部动态插值已全 esc）",
+        "recordRows": "行构造（内部动态插值已全 esc）",
+        "assetTreeRows": "行构造（内部动态插值已全 esc）",
+        "trafficRows": "行构造（内部动态插值已全 esc）",
+        "nodeRows": "行构造（内部动态插值已全 esc）",
+        "edgeRows": "行构造（内部动态插值已全 esc）",
+        "activityRows": "行构造（内部动态插值已全 esc）",
+        "providerRows": "行构造（内部动态插值已全 esc）",
+        "recentRows": "行构造（内部动态插值已全 esc）",
+        # 静态字面量三元/查表：分支均为字面量，无动态数据
+        "f.disposal==='fixed' ? '<span style=\"color:#2ecc71\">已修复</span>' : '开放'": "静态字面量三元",
+        ("r.verdict==='fixed' ? '<span style=\"color:#2ecc71\">已修复</span>' :"
+         " r.verdict==='reproduced' ? '<span style=\"color:#e74c3c\">仍可复现</span>' : '无法确认'"): "静态字面量三元",
+        "colors[hit.kind]||'#fff'": "固定色板查表",
+    }
+    # 期望清点：esc() 包裹处数 / 白名单命中处数（新增插值必须显式归类，防止漏包）
+    # 当前清点：117 处插值 = 77 处 esc() + 40 处白名单（计数 20、sev 内部/调用点 4、
+    # 行构造变量 13、静态字面量三元/查表 3）
+    ESC_COUNT = 77
+    WHITELIST_COUNT = 40
+
+    def test_no_bare_interpolations(self):
+        page = _panel_page()
+        bare = [e for e in _extract_interpolations(page)
+                if not e.strip().startswith("esc(") and e.strip() not in self.WHITELIST]
+        self.assertEqual(bare, [], f"发现未转义插值: {bare}")
+
+    def test_interpolation_inventory(self):
+        page = _panel_page()
+        exprs = [e.strip() for e in _extract_interpolations(page)]
+        esc_n = sum(1 for e in exprs if e.startswith("esc("))
+        wl_n = sum(1 for e in exprs if e in self.WHITELIST)
+        self.assertEqual(esc_n, self.ESC_COUNT)
+        self.assertEqual(wl_n, self.WHITELIST_COUNT)
+        self.assertEqual(esc_n + wl_n, len(exprs))
+
+    def test_esc_escapes_xss_payload(self):
+        import re as _re
+
+        page = _panel_page()
+        body = _extract_esc_body(page)
+        chars = _re.search(r"replace\(/\[([^\]]*)\]/g", body)
+        self.assertIsNotNone(chars, "esc() 未按字符类全局替换")
+        mapping = {m[1]: m[3] for m in
+                   _re.findall(r"(['\"])(.)\1\s*:\s*(['\"])(.*?)\3", body)}
+        self.assertEqual(sorted(chars.group(1)), sorted("&<>\"'"))
+        self.assertEqual(sorted(mapping), sorted("&<>\"'"))
+        self.assertEqual(mapping["&"], "&amp;")
+        self.assertEqual(mapping["<"], "&lt;")
+        self.assertEqual(mapping[">"], "&gt;")
+        self.assertEqual(mapping["\""], "&quot;")
+        self.assertEqual(mapping["'"], "&#39;")
+        payload = "</pre><img src=x onerror=alert(1)>"
+        escaped = "".join(mapping.get(ch, ch) for ch in payload)
+        self.assertNotIn("<img", escaped)
+        self.assertNotIn("<", escaped)
+        self.assertNotIn(">", escaped)
+        self.assertIn("&lt;img", escaped)
+
+    def test_csp_meta_present(self):
+        page = _panel_page()
+        self.assertIn(
+            '<meta http-equiv="Content-Security-Policy" '
+            "content=\"object-src 'none'; base-uri 'none'; frame-ancestors 'none'\">",
+            page)
+        # 不加 script-src 限制，避免破坏内联脚本
+        self.assertNotIn("script-src", page.split("</head>")[0])
+
+    def test_token_storage_moved_to_session_storage(self):
+        page = _panel_page()
+        self.assertNotIn("localStorage", page)
+        # 读写点：api() 读、401 写入、EventSource URL 构造处读
+        self.assertGreaterEqual(page.count("sessionStorage"), 3)
 
 
 if __name__ == "__main__":
