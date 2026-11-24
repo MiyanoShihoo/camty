@@ -145,12 +145,16 @@ class Todolist:
         self.db.sync_todolist(items)
 
     def ready_items(self) -> list[dict]:
-        """前置已完成的 pending 项。"""
+        """前置已完成的 pending 项。F- 开头为台账事实（非任务）——视为已满足。"""
         items = self.items()
         done = {i["item_id"] for i in items if i["status"] == "done"}
+        def satisfied(d: str) -> bool:
+            if d in done:
+                return True
+            return d.startswith("F-") or d.startswith("I-")  # 事实/外部条件非任务
         return [
             i for i in items
-            if i["status"] == "pending" and all(d in done for d in i.get("depends_on") or [])
+            if i["status"] == "pending" and all(satisfied(d) for d in i.get("depends_on") or [])
         ]
 
     def summary(self) -> str:

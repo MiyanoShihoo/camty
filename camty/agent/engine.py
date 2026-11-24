@@ -164,7 +164,8 @@ class Engine:
             pending = self.graph.intents_pending()
             ready = self.todolist.ready_items()
             if not pending and not ready and self.todolist.items():
-                return True
+                # 仅全部条目 done 才算达成——受阻项 ≠ 完成（F-012 误判修复）
+                return all(i["status"] == "done" for i in self.todolist.items())
         return met
 
     # ---- 规划 ----
