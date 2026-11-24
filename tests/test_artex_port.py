@@ -443,6 +443,30 @@ class TestTrafficProxy(unittest.TestCase):
             proxy.stop()
 
 
+class TestTrafficLeftoverPlumbing(unittest.TestCase):
+    def test_overread_returns_tail_not_socket_attr(self):
+        """头+体一次过读的交接必须走返回值，不能挂 socket 属性。
+
+        Python 3.13+ 的 socket 对象没有 __dict__，旧实现把过读尾部挂
+        sock._camty_leftover 会直接 AttributeError（真实 socketpair 可复现）。
+        """
+        import socket as socket_mod
+        from camty.traffic import _read_body, _read_headers
+
+        a, b = socket_mod.socketpair()
+        try:
+            b.sendall(b"POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\nHELLO")
+            b.close()  # 让 recv 读尽后自然 EOF
+            headers, tail = _read_headers(a)
+            self.assertEqual(dict(headers)[b"Content-Length"], b"5")
+            self.assertEqual(tail, b"HELLO")
+            self.assertFalse(hasattr(a, "_camty_leftover"))  # 零隐藏状态
+            body = _read_body(a, headers, tail)
+            self.assertEqual(body, b"HELLO")
+        finally:
+            a.close()
+
+
 class TestNotify(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

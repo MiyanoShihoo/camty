@@ -245,12 +245,12 @@ class TrafficProxy:
     def _handle_plain(self, client, first_line: bytes):
         """绝对形式 HTTP（http:// 代理流量）：解析头后直转，记录往返。"""
         method, target = first_line.split()[0], first_line.split()[1].decode("latin-1")
-        headers = _read_headers(client)
+        headers, tail = _read_headers(client)
         host = _header(headers, b"host") or target.split("//")[-1].split("/")[0]
         if not self._scope_ok(host):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
-        body = _read_body(client, headers)
+        body = _read_body(client, headers, tail)
         self._forward_and_record(client, method, target, host, headers, body)
 
     def _handle_connect(self, client, hostport: str):
@@ -276,8 +276,8 @@ class TrafficProxy:
                 parts = first.split()
                 if len(parts) < 2:
                     break
-                headers = _read_headers(tls_client)
-                body = _read_body(tls_client, headers)
+                headers, tail = _read_headers(tls_client)
+                body = _read_body(tls_client, headers, tail)
                 self._forward_and_record(
                     tls_client, parts[0].decode("latin-1"),
                     parts[1].decode("latin-1"), host, headers, body, tls=True,
@@ -351,26 +351,26 @@ def _read_line(sock) -> bytes | None:
     return buf.split(b"\r\n", 1)[0] or None
 
 
-def _read_headers(sock) -> list[tuple[bytes, bytes]]:
+def _read_headers(sock) -> tuple[list[tuple[bytes, bytes]], bytes]:
+    """解析头并返回 (headers, 过读尾部)。
+
+    _recv_until 可能一次读越过 \r\n\r\n——Python 3.13+ 的 socket 对象没有
+    __dict__，不能挂自定义属性暂存（挂属性即 AttributeError），因此过读
+    字节以返回值显式传给 _read_body，不落任何隐藏状态。
+    """
     raw = _recv_until(sock, b"\r\n\r\n")
     if not raw:
-        return []
-    head = raw.split(b"\r\n\r\n", 1)[0]
-    # 处理 _recv_until 可能读多的部分：把残余留在 sock 不可行，由 _read_body 接收 leftovers
-    tail = raw.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in raw else b""
-    if tail:
-        sock._camty_leftover = tail  # type: ignore[attr-defined]
+        return [], b""
+    head, _, tail = raw.partition(b"\r\n\r\n")
     headers = []
     for line in head.split(b"\r\n"):
         if b":" in line and not line[:1].isspace():
             k, v = line.split(b":", 1)
             headers.append((k.strip(), v.strip()))
-    return headers
+    return headers, tail
 
 
-def _read_body(sock, headers: list[tuple[bytes, bytes]]) -> bytes:
-    leftover = getattr(sock, "_camty_leftover", b"")
-    sock._camty_leftover = b""  # type: ignore[attr-defined]
+def _read_body(sock, headers: list[tuple[bytes, bytes]], leftover: bytes = b"") -> bytes:
     length = 0
     for k, v in headers:
         if k.lower() == b"content-length":
