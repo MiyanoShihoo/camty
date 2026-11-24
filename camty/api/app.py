@@ -1,15 +1,19 @@
 """FastAPI 服务：交战面板（双图/资产/流量/过程/复测/黑板）+ 引擎控制 + SSE 活动流。
 
 启动: uvicorn camty.api.app:app --port 8090
-鉴权: 设置 CAMTY_PANEL_TOKEN 环境变量后，/api/* 要求 Bearer token（或 ?token=，SSE 用）
+鉴权: /api/* 要求 Bearer token（或 ?token=，SSE 用）——设置 CAMTY_PANEL_TOKEN 时用指定值；
+      未设置时自动生成随机 token 并打印到 stderr（fail-secure）
 （可选依赖：pip install fastapi uvicorn）
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
+import secrets
+import sys
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -31,20 +35,39 @@ _ENGAGEMENTS: dict[str, Engagement] = {}
 _ENGINE_STATE: dict[str, dict] = {}
 _RETEST_STATE: dict[str, dict] = {}
 
+_GENERATED_PANEL_TOKEN: str | None = None
+
 
 def _panel_token() -> str:
-    return os.environ.get("CAMTY_PANEL_TOKEN", "")
+    """面板 token：优先 CAMTY_PANEL_TOKEN；未设置时生成随机 token（fail-secure），
+    进程生命周期内复用，首次生成打印到 stderr（模式对齐 c2/server/camty_c2.py）。"""
+    global _GENERATED_PANEL_TOKEN
+    env_token = os.environ.get("CAMTY_PANEL_TOKEN", "")
+    if env_token:
+        return env_token
+    if _GENERATED_PANEL_TOKEN is None:
+        _GENERATED_PANEL_TOKEN = secrets.token_hex(16)
+        print(f"[camty] CAMTY_PANEL_TOKEN 未设置，已生成随机面板 token: {_GENERATED_PANEL_TOKEN}"
+              "（可用 CAMTY_PANEL_TOKEN 显式指定；本进程内复用）", file=sys.stderr)
+    return _GENERATED_PANEL_TOKEN
+
+
+def _reset_panel_token_for_tests() -> None:
+    """测试专用：清空生成的随机 token（不影响 CAMTY_PANEL_TOKEN 的优先级与生产语义）。"""
+    global _GENERATED_PANEL_TOKEN
+    _GENERATED_PANEL_TOKEN = None
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """设置 CAMTY_PANEL_TOKEN 后 /api/* 需要 Bearer 鉴权（SSE 走 ?token=）。"""
-    token = _panel_token()
-    if token and request.url.path.startswith("/api/"):
+    """/api/* 需要 Bearer token（或 ?token=，SSE 用）；token 见 _panel_token（fail-secure）。"""
+    if request.url.path.startswith("/api/"):
+        token = _panel_token()
         auth = request.headers.get("Authorization", "")
         supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
         supplied = supplied or request.query_params.get("token", "")
-        if supplied != token:
+        # 按字节比较：compare_digest 的 str 形式对非 ASCII 输入会 TypeError
+        if not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
             return JSONResponse(status_code=401, content={"detail": "面板未授权（Bearer token 错误）"})
     return await call_next(request)
 

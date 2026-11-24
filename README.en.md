@@ -76,7 +76,7 @@ python -m camty audit engagements/my-target.yaml                 # audit hash-ch
 
 **Audit tamper-evidence boundary**: the hash chain itself detects local edits (any change/deletion/insertion breaks it); `save_state` and report generation automatically anchor `(count, head_hash)` into `state.db` to detect tail truncation; setting the `CAMTY_AUDIT_KEY` environment variable appends an HMAC-SHA256 to each entry, detecting "rewrite every record and recompute the whole chain". Without a key or anchors, only local edits are detectable.
 
-**Panel**: `uvicorn camty.api.app:app --port 8090` — dashboard, ledger, force-directed asset coverage, attack chain, traffic replay, exploration graph, approval queue; the header input box injects steering messages at any time (human-in-the-loop).
+**Panel**: `uvicorn camty.api.app:app --port 8090` — dashboard, ledger, force-directed asset coverage, attack chain, traffic replay, exploration graph, approval queue; the header input box injects steering messages at any time (human-in-the-loop). Panel `/api/*` endpoints require a Bearer token: it uses `CAMTY_PANEL_TOKEN` when set, and a random token is generated and printed to stderr otherwise.
 
 **Multiple targets in parallel**: `python -m camty multi a.yaml b.yaml c.yaml`.
 

@@ -81,7 +81,7 @@ python -m camty audit engagements/my-target.yaml                 # 审计哈希�
 
 **审计防篡改边界**：哈希链本身检测局部编辑（改/删/插任意一条即断链）；`save_state` 与报告生成会自动把 `(count, head_hash)` 锚点写入 `state.db` 用于检测尾部截断；设置环境变量 `CAMTY_AUDIT_KEY` 后条目追加 HMAC-SHA256，可检测"篡改全部记录并重算整条链"。无 key、无锚点时仅能检测局部编辑。
 
-**面板**：`uvicorn camty.api.app:app --port 8090` → 仪表盘 / 台账 / 资产覆盖力导向图 / 攻击链 / 流量回放 / 探索图 / 审批队列，页头输入框随时注入转向指令（人在环路）。
+**面板**：`uvicorn camty.api.app:app --port 8090` → 仪表盘 / 台账 / 资产覆盖力导向图 / 攻击链 / 流量回放 / 探索图 / 审批队列，页头输入框随时注入转向指令（人在环路）。 面板 `/api/*` 需要 Bearer token：设置 `CAMTY_PANEL_TOKEN` 时用指定值，未设置时自动生成随机 token 并打印到 stderr。
 
 **多目标并行**：`python -m camty multi a.yaml b.yaml c.yaml` —— 每交战一进程，汇总结录。
 

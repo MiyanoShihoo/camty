@@ -82,8 +82,13 @@ class TestPanelAuthAndSSE(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.eng = make_eng(self.tmp)
         os.environ["CAMTY_VAULT"] = str(Path(self.tmp) / "keys.json")
+        os.environ.pop("CAMTY_PANEL_TOKEN", None)
         from camty.api import app as app_mod
 
+        # P0-3 后 /api/* 一律需鉴权：默认走进程生成的随机 token（fail-secure）
+        app_mod._reset_panel_token_for_tests()
+        self.gen_token = app_mod._panel_token()
+        self.auth = {"Authorization": f"Bearer {self.gen_token}"}
         # 面板发现交战靠 CWD/engagements，这里直接注入内存实例
         app_mod._ENGAGEMENTS[self.eng.name] = self.eng
         self.client = TestClient(app_mod.app)
@@ -95,8 +100,16 @@ class TestPanelAuthAndSSE(unittest.TestCase):
 
         os.environ.pop("CAMTY_PANEL_TOKEN", None)
 
-    def test_no_token_required_by_default(self):
+    def test_unset_token_fail_secure(self):
+        """P0-3：未设 CAMTY_PANEL_TOKEN → 自动生成随机 token，无 token 访问 /api/* 一律 401。
+
+        原 test_no_token_required_by_default 断言的正是本任务修复的 fail-open 行为，
+        随行为修复重写（详见 CHANGES.md P0-3 节）。
+        """
         resp = self.client.get(f"/api/engagements/{self.eng.name}/ledger")
+        self.assertEqual(resp.status_code, 401)
+        resp = self.client.get(f"/api/engagements/{self.eng.name}/ledger",
+                               headers=self.auth)
         self.assertEqual(resp.status_code, 200)
 
     def test_bearer_required_when_configured(self):
@@ -105,6 +118,10 @@ class TestPanelAuthAndSSE(unittest.TestCase):
         self.assertEqual(resp.status_code, 401)
         resp = self.client.get(f"/api/engagements/{self.eng.name}/ledger",
                                headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(resp.status_code, 401)
+        # 显式环境变量优先：进程先前生成的随机 token 不再生效
+        resp = self.client.get(f"/api/engagements/{self.eng.name}/ledger",
+                               headers={"Authorization": f"Bearer {self.gen_token}"})
         self.assertEqual(resp.status_code, 401)
         resp = self.client.get(f"/api/engagements/{self.eng.name}/ledger",
                                headers={"Authorization": "Bearer sekret"})
@@ -120,7 +137,7 @@ class TestPanelAuthAndSSE(unittest.TestCase):
     def test_usage_endpoint(self):
         log = UsageLog(Path(self.tmp) / "usage.jsonl")
         log.record("decide", "p1", "m1", prompt_tokens=100, completion_tokens=50)
-        resp = self.client.get("/api/usage")
+        resp = self.client.get("/api/usage", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["totals"]["calls"], 1)
@@ -128,21 +145,25 @@ class TestPanelAuthAndSSE(unittest.TestCase):
 
     def test_blackboard_endpoints(self):
         resp = self.client.post(f"/api/engagements/{self.eng.name}/blackboard",
-                                json={"kind": "operator", "note": "注意限流"})
+                                json={"kind": "operator", "note": "注意限流"},
+                                headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        resp = self.client.get(f"/api/engagements/{self.eng.name}/blackboard")
+        resp = self.client.get(f"/api/engagements/{self.eng.name}/blackboard",
+                               headers=self.auth)
         notes = resp.json()["notes"]
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0]["source"], "panel")
         # 空备注被拒
         resp = self.client.post(f"/api/engagements/{self.eng.name}/blackboard",
-                                json={"kind": "operator", "note": " "})
+                                json={"kind": "operator", "note": " "},
+                                headers=self.auth)
         self.assertEqual(resp.status_code, 400)
 
     def test_sse_streams_activity(self):
         self.eng.db.add_activity("I-001", 1, "nuclei", "{}", "2 hits", None)
         resp = self.client.get(f"/api/engagements/{self.eng.name}/events",
-                               params={"duration": 0.1, "interval": 0.05})
+                               params={"duration": 0.1, "interval": 0.05},
+                               headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         data_lines = [line for line in resp.text.splitlines()
                       if line.startswith("data:")]
@@ -151,6 +172,91 @@ class TestPanelAuthAndSSE(unittest.TestCase):
         self.assertEqual(len(payload["activity"]), 1)
         self.assertEqual(payload["activity"][0]["tool"], "nuclei")
         self.assertIn("engine", payload["state"])
+
+
+class TestPanelAuthFailSecure(unittest.TestCase):
+    """P0-3：未设 CAMTY_PANEL_TOKEN 时自动生成随机 token 并强制鉴权（fail-secure）。
+
+    对齐 c2/server/camty_c2.py 的缺省随机 token 模式；比较用 hmac.compare_digest；
+    不做回环判断（反向代理下恒为 127.0.0.1，不可靠）。
+    """
+
+    def setUp(self):
+        import os
+
+        from fastapi.testclient import TestClient
+
+        self.tmp = tempfile.mkdtemp()
+        self.eng = make_eng(self.tmp)
+        os.environ["CAMTY_VAULT"] = str(Path(self.tmp) / "keys.json")
+        os.environ.pop("CAMTY_PANEL_TOKEN", None)
+        from camty.api import app as app_mod
+
+        app_mod._reset_panel_token_for_tests()
+        app_mod._ENGAGEMENTS[self.eng.name] = self.eng
+        self.client = TestClient(app_mod.app)
+        self.app_mod = app_mod
+
+    def tearDown(self):
+        import os
+
+        self.app_mod._ENGAGEMENTS.pop(self.eng.name, None)
+        os.environ.pop("CAMTY_PANEL_TOKEN", None)
+        self.app_mod._reset_panel_token_for_tests()
+
+    def test_unset_env_generates_token_and_blocks_unauthenticated(self):
+        resp = self.client.get("/api/engagements")
+        self.assertEqual(resp.status_code, 401)
+        token = self.app_mod._panel_token()  # 只读获取进程生成的 token
+        self.assertRegex(token, r"^[0-9a-f]{32}$")  # secrets.token_hex(16)
+        resp = self.client.get("/api/engagements",
+                               headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(resp.status_code, 200)
+        resp = self.client.get("/api/engagements",
+                               headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(resp.status_code, 401)
+        # ?token= 通道（SSE 需要）
+        resp = self.client.get("/api/engagements", params={"token": token})
+        self.assertEqual(resp.status_code, 200)
+        # 静态页面壳不带数据，无需 token（JS 内 prompt 后走 /api/*）
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_non_ascii_token_rejected_not_500(self):
+        # compare_digest 的 str 形式对非 ASCII 会 TypeError；实现须按字节比较避免 500。
+        # httpx 只接受 ascii/bytes 头值，这里直接给原始字节构造非 ASCII 凭据。
+        resp = self.client.get("/api/engagements",
+                              headers={"Authorization": "Bearer 密码1324".encode("utf-8")})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_token_reused_and_env_precedence(self):
+        first = self.app_mod._panel_token()
+        self.assertEqual(first, self.app_mod._panel_token())  # 进程生命周期内复用
+        self.app_mod.os.environ["CAMTY_PANEL_TOKEN"] = "explicit-token"
+        self.assertEqual(self.app_mod._panel_token(), "explicit-token")  # 显式指定优先
+        self.app_mod.os.environ.pop("CAMTY_PANEL_TOKEN", None)
+        self.app_mod._reset_panel_token_for_tests()
+        regen = self.app_mod._panel_token()  # 重置后重新生成
+        self.assertRegex(regen, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(regen, first)
+
+    def test_generation_prints_token_to_stderr(self):
+        import contextlib
+        import io
+
+        self.app_mod._reset_panel_token_for_tests()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            token = self.app_mod._panel_token()
+        self.assertIn(token, err.getvalue())
+        self.assertIn("CAMTY_PANEL_TOKEN", err.getvalue())
+
+    def test_uses_constant_time_compare(self):
+        import inspect
+
+        src = inspect.getsource(self.app_mod)
+        self.assertIn("hmac.compare_digest", src)
+        self.assertNotIn("supplied != token", src)
 
 
 # ---- P0-2 面板存储型 XSS（目标 → 操作员）----

@@ -67,38 +67,50 @@ class TestSideQuestion(unittest.TestCase):
 
 
 class TestAskAPI(unittest.TestCase):
+    PANEL_TOKEN = "sidequestion-panel-token"
+
     def setUp(self):
+        import os
+
         from fastapi.testclient import TestClient
 
         self.tmp = tempfile.mkdtemp()
         self.eng = make_eng(self.tmp)
         from camty.api import app as app_mod
 
+        # P0-3 后 /api/* 一律需 Bearer 鉴权（fail-secure），测试固定显式 token
+        os.environ["CAMTY_PANEL_TOKEN"] = self.PANEL_TOKEN
         app_mod._ENGAGEMENTS[self.eng.name] = self.eng
         self.client = TestClient(app_mod.app)
         self.app_mod = app_mod
 
     def tearDown(self):
+        import os
+
         self.app_mod._ENGAGEMENTS.pop(self.eng.name, None)
+        os.environ.pop("CAMTY_PANEL_TOKEN", None)
 
     def test_ask_endpoint(self):
         with mock.patch("camty.llm.router.LLMRouter") as router_cls:
             router_cls.return_value = MockRouter("回答内容")
             resp = self.client.post(f"/api/engagements/{self.eng.name}/ask",
-                                    json={"question": "状态如何"})
+                                    json={"question": "状态如何"},
+                                    headers={"Authorization": f"Bearer {self.PANEL_TOKEN}"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["answer"], "回答内容")
 
     def test_ask_endpoint_empty_question(self):
         resp = self.client.post(f"/api/engagements/{self.eng.name}/ask",
-                                json={"question": " "})
+                                json={"question": " "},
+                                headers={"Authorization": f"Bearer {self.PANEL_TOKEN}"})
         self.assertEqual(resp.status_code, 400)
 
     def test_ask_endpoint_llm_failure(self):
         with mock.patch("camty.llm.router.LLMRouter") as router_cls:
             router_cls.return_value.chat.side_effect = RuntimeError("no key")
             resp = self.client.post(f"/api/engagements/{self.eng.name}/ask",
-                                    json={"question": "x"})
+                                    json={"question": "x"},
+                                    headers={"Authorization": f"Bearer {self.PANEL_TOKEN}"})
         self.assertEqual(resp.status_code, 503)
         self.assertIn("侧问失败", resp.json()["detail"])
 

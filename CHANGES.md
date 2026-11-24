@@ -43,3 +43,16 @@
   - 静态模板 HTML 结构未改动；JSONL/协议无改动。
 - 新增测试：`tests/test_panel.py` 新增 `TestPanelXssHardening` 共 5 个（test_no_bare_interpolations / test_interpolation_inventory / test_esc_escapes_xss_payload / test_csp_meta_present / test_token_storage_moved_to_session_storage）；修复前 5 个全部按预期失败复现问题。插值静态断言：花括号配平提取 `_PAGE` 全部 `${...}`（含嵌套模板，共 117 处）＝ 77 处 `esc(` 包裹 + 40 处显式白名单（计数/索引 20、sev 内部与调用点 4、行构造变量 13、静态字面量三元/查表 3，测试内逐个列明原因）。esc 单测从 `_PAGE` 中提取真实映射表并应用到 `</pre><img src=x onerror=alert(1)>`，断言转义后不含 `<img`。纯标准库，无真实网络。
 - 全量测试：`python -m pytest tests/ -q` → 288 passed（基线 283 + 新增 5，既有测试无失败）。
+
+## P0-3 面板鉴权 fail-open → fail-secure
+
+- 任务号：P0-3
+- 涉及文件：`camty/api/app.py`、`tests/test_panel.py`、`tests/test_sidequestion.py`、`README.md`、`README.en.md`
+- 变更摘要：
+  - `_panel_token()` 改为模块级单例惰性初始化：优先 `CAMTY_PANEL_TOKEN`；未设置时用 `secrets.token_hex(16)` 生成随机 token（对齐 `c2/server/camty_c2.py` 的缺省随机 token 模式），进程生命周期内复用，首次生成打印到 stderr（提示可用 `CAMTY_PANEL_TOKEN` 显式指定）；
+  - `auth_middleware` 对 `/api/*` 一律强制鉴权（原先未设置环境变量时完全无鉴权），保留 Bearer 与 `?token=`（SSE 用）两条通道；比较改 `hmac.compare_digest`，按 UTF-8 字节比较（str 形式对非 ASCII 输入会 `TypeError`，拒绝场景应得 401 而非 500）；不做回环判断（反向代理下恒为 127.0.0.1，不可靠）；
+  - 测试专用重置入口 `_reset_panel_token_for_tests()`（只清生成态，不影响环境变量优先级与生产语义）；只读获取生成 token 直接用 `_panel_token()`；
+  - 行为变更同步：`tests/test_panel.py` 原 `test_no_token_required_by_default` 断言的正是本任务要修复的 fail-open 行为，按验收要求重写为 `test_unset_token_fail_secure`（无 token → 401，携带生成 token → 200）；其余面板测试请求统一带生成 token 的 Bearer 头；`tests/test_sidequestion.py::TestAskAPI` 同理改为固定 `CAMTY_PANEL_TOKEN` 并携带 Bearer 头（其关于 200/400/503 的既有断言全部保留，仅补鉴权管道）；
+  - README.md / README.en.md 面板说明补一句 token 行为（未设置时自动生成随机 token 并打印到 stderr，设置后用指定值）。
+- 新增测试：`tests/test_panel.py` 新增 `TestPanelAuthFailSecure` 共 5 个（test_unset_env_generates_token_and_blocks_unauthenticated / test_non_ascii_token_rejected_not_500 / test_token_reused_and_env_precedence / test_generation_prints_token_to_stderr / test_uses_constant_time_compare），另重写 1 个既有 fail-open 断言（见上）；修复前 5 个新增用例按预期失败复现问题（无 token 请求得 200、无单例生成、无 stderr 提示、无常时比较）。纯标准库（secrets/hmac），无真实网络。
+- 全量测试：`python -m pytest tests/ -q` → 293 passed（P0-2 后 288 + 新增 5，既有测试无失败；`tests/test_sidequestion.py` 3 个用例仅同步鉴权管道后继续通过）。
