@@ -124,5 +124,43 @@ class TestRunCmdRobustness(unittest.TestCase):
         self.assertIn("build_beacon_json(beacon_json, 4096,", src)
 
 
+class TestApiTokenCompare(unittest.TestCase):
+    """P2-8：operator API token 比较改恒时（hmac.compare_digest，UTF-8 字节）。"""
+
+    @staticmethod
+    def _handler(auth_value):
+        import types
+
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "c2" / "server"))
+        import camty_c2
+
+        handler = camty_c2.ApiHandler.__new__(camty_c2.ApiHandler)  # 跳过 socket 初始化
+        handler.headers = {"Authorization": auth_value} if auth_value is not None else {}
+        handler.server = types.SimpleNamespace(token="sekret-token-123")
+        return handler
+
+    def test_compare_digest_in_source(self):
+        src = read(ROOT / "c2" / "server" / "camty_c2.py")
+        self.assertIn("import hmac", src)
+        self.assertIn("hmac.compare_digest(", src, "token 比较必须恒时")
+        self.assertIn('auth.encode("utf-8")', src,
+                      "必须按 UTF-8 字节比较（compare_digest 的 str 形式对非 ASCII 会 TypeError）")
+
+    def test_authorized_exact_match(self):
+        self.assertTrue(self._handler("Bearer sekret-token-123")._authorized())
+
+    def test_authorized_rejects_variants(self):
+        for header in ("Bearer sekret-token-124", "Bearer sekret", "",
+                       "bearer sekret-token-123", "Bearer  sekret-token-123", None):
+            self.assertFalse(self._handler(header)._authorized(), f"应拒绝 {header!r}")
+
+    def test_authorized_non_ascii_no_500(self):
+        """非 ASCII 头按字节比较返回 False，不得抛 TypeError（否则对应 500）。"""
+        self.assertFalse(self._handler("Bearer tokén")._authorized())
+
+
 if __name__ == "__main__":
     unittest.main()

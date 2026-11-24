@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import secrets
@@ -168,7 +169,10 @@ class BeaconHandler(BaseHTTPRequestHandler):
 class ApiHandler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         auth = self.headers.get("Authorization", "")
-        return auth == f"Bearer {self.server.token}"
+        # 恒时比较（token 逐位泄密防护）。按 UTF-8 字节比较：
+        # compare_digest 的 str 形式对非 ASCII 输入会 TypeError（拒绝场景应得 401 而非 500）
+        return hmac.compare_digest(auth.encode("utf-8"),
+                                   f"Bearer {self.server.token}".encode("utf-8"))
 
     def _json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

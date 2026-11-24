@@ -148,6 +148,21 @@ class TestC2EndToEnd(unittest.TestCase):
                 _ctx(self),
             )
 
+    def test_api_rejects_missing_or_wrong_bearer(self):
+        """P2-8：operator API 无 token / 错 token 一律 401（恒时比较的行为不变式）。"""
+        import urllib.error
+        import urllib.request
+        from urllib.request import ProxyHandler, build_opener
+
+        opener = build_opener(ProxyHandler({}))
+        for headers in ({}, {"Authorization": "Bearer wrong-token"},
+                        {"Authorization": f"Bearer {self.token}x"}):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{self.api_port}/health", headers=headers)
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                opener.open(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 401, f"应 401: {headers}")
+
 
 def _ctx(test):
     import camty.adapters.c2  # noqa: F401 - 确保 RunContext 无 eng 也能工作

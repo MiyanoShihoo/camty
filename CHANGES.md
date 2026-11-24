@@ -106,3 +106,15 @@
 - 新增测试：`tests/test_c2_hardening.py` `TestRunCmdRobustness` 共 4 个（test_drains_pipe_after_buffer_full / test_timeout_kills_and_annotates / test_still_active_not_reported_as_exit_code / test_build_beacon_json_escapes_all_fields）；既有植入体 E2E（`tests/test_c2_implant.py`）保持绿。
 - 运行时验证（本机，修复后 beacon.exe 实跑）：短命令 `echo` exit=0 约 1s；>64KB 输出命令（`for /l 1..3000 echo AAA…`，约 99KB）3s 完成且输出截断在 65535（修复前子进程会在 64KB 处写满管道永久阻塞）；挂死命令（`ping -n 200`）60.4s 被 `TerminateProcess`，输出尾 `\n(timeout killed)`、exit=-1（非 259）。另用 `#include` 真实 `build_beacon_json` 的 harness 喂入含引号/反斜杠/控制字符的恶意字段，Python `json.loads` 解析成功且 roundtrip 值精确一致。
 - 全量测试：`python -m pytest tests/ -q` → 308 passed（304 + 新增 4，既有测试无失败）。
+
+## P2-8 小项加固（C2 token 恒时比较 + vault 明文兜底收紧）
+
+- 任务号：P2-8
+- 涉及文件：`c2/server/camty_c2.py`、`camty/llm/vault.py`、`tests/test_c2_hardening.py`、`tests/test_vault_fallback.py`（新增）、`tests/test_c2_e2e.py`
+- 变更摘要：
+  - `camty_c2.py` `_authorized`：token 比较 `==` → `hmac.compare_digest`（新增 `import hmac`），并按 UTF-8 字节比较（compare_digest 的 str 形式对非 ASCII 输入会 TypeError，拒绝场景应得 401 而非 500——与 P0-3 面板修复同一模式）；判定结果语义不变（恰好匹配才放行）；
+  - `camty/llm/vault.py` 收紧：cryptography 缺失时 `encrypt_text` 默认拒绝写入新密钥（RuntimeError，提示 `pip install cryptography` 并指明逃生口）；仅当显式设置 `CAMTY_ALLOW_PLAINTEXT_KEYS=1` 才允许明文兜底——返回 `{"encrypted": false, "payload": ...}` 标记 blob 并发 `UserWarning`（警告保留）；新增 `plaintext_fallback_allowed()`（严格匹配 `=1`）与 `PLAINTEXT_ENV` 常量；`decrypt_text` 支持读回标记 blob（写入已获显式同意，读取不设二次门禁），已加密 blob 无 cryptography 时仍拒绝、opt-in 不放宽；有 cryptography 的加密路径行为不变；
+  - 范围边界说明（router.py 不在本任务范围）：`router.save()` 在"未设 CAMTY_MASTER_KEY"或"cryptography 缺失"时的明文写分支（camty/llm/router.py:168-171）不属于本任务（router.py 由其他任务持有，本任务红线禁碰），既有"已加密 vault 拒绝降级"检查未动；vault 模块自身的写入门禁已按规格收紧，router 侧如需把 `plaintext_fallback_allowed()` 接进 save() 的 else 分支，属 router 任务的后续接线点。可运行反证 PoC（本机实测）：环境无 `CAMTY_MASTER_KEY`、无 opt-in 时，`LLMRouter(vault_path=...).set_provider(...)` 仍写出明文 keys.json——即该分支现状如实记录于此，非本任务引入也非本任务可修；
+  - 环境事实修正：任务书"本机未安装 cryptography"与实际不符——cryptography 50.0.2 以 `--target` 方式装在仓库 `vendor/`，由 `camty/__init__.py`（CAMTY_NO_VENDOR=1 可禁用）自动挂载 sys.path；"无 cryptography 环境"对应 `CAMTY_NO_VENDOR=1`，实测该模式下 `TestVault` 按既有 skipUnless 跳过、本任务新增的 vault/hardening 用例全部通过，而 `TestC2EndToEnd` 整类在 setUpClass 失败为**既有行为**（C2 服务端协议层 protocol.py 硬性要求 cryptography，非本任务引入、超出本任务范围）。
+- 新增测试：`tests/test_vault_fallback.py` 共 6 个（test_fallback_requires_explicit_one / test_encrypt_refuses_without_cryptography / test_encrypt_plaintext_fallback_optin / test_plaintext_blob_roundtrip / test_decrypt_encrypted_blob_refuses_without_cryptography / test_real_crypto_unchanged——均用 mock 强制 `_fernet_cls` 为 None，装不装 cryptography 断言都成立，最后一个 skipUnless 守卫真实加密路径）；`tests/test_c2_hardening.py` `TestApiTokenCompare` 共 4 个（test_compare_digest_in_source / test_authorized_exact_match / test_authorized_rejects_variants / test_authorized_non_ascii_no_500）；`tests/test_c2_e2e.py` 新增 1 个真实服务端行为用例（test_api_rejects_missing_or_wrong_bearer：无 token / 错 token / 错前缀均 401）。
+- 全量测试：`python -m pytest tests/ -q` → 319 passed（308 + 新增 11，既有测试无失败）。
