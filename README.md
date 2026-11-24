@@ -26,7 +26,7 @@ Camty 是一套**可审计的红队交战工作台**：把一次渗透测试的�
 ## 强势点
 
 **1. 证据链优先的交战治理**
-范围白名单 deny-by-default（DNS 解析防绕过）、每动作落 JSONL 审计哈希链（防篡改可回放）、利用级动作必须引用台账中已验证发现（finding-ID 硬门控）、发现带血缘（`F-003 ← F-001` 一眼看清利用链从哪来）。
+范围白名单 deny-by-default（DNS 解析防绕过）、每动作落 JSONL 审计哈希链（局部篡改必断链，可回放；配置 `CAMTY_AUDIT_KEY` 或保存锚点后可检测全量重算重写与尾部截断）、利用级动作必须引用台账中已验证发现（finding-ID 硬门控）、发现带血缘（`F-003 ← F-001` 一眼看清利用链从哪来）。
 
 **2. 41 个结构化适配器**
 外部工具（subfinder/httpx/nuclei/fscan）+ 自研武器（js-recon 前端测绘、inj-probe 多载体注入七变体、authz-probe 鉴权矩阵、code-audit 白盒审计、mail-code 验证码收件、osint-recon 目标画像、cve-intel CVE 情报、hashcrack GPU 破解）+ 内网全家桶（impacket 13 件 + 5 引擎横向移动）+ C2 三件套。工具输出自动进台账与资产图。
@@ -76,8 +76,10 @@ python -m camty engine engagements/my-target.yaml --agent --budget 30 --traffic
 
 # ③ 产出
 python -m camty report engagements/my-target.yaml --format html   # / docx / src
-python -m camty audit engagements/my-target.yaml                 # 审计哈希链校验
+python -m camty audit engagements/my-target.yaml                 # 审计哈希链校验（输出 (count, head_hash) 锚点供外部存档）
 ```
+
+**审计防篡改边界**：哈希链本身检测局部编辑（改/删/插任意一条即断链）；`save_state` 与报告生成会自动把 `(count, head_hash)` 锚点写入 `state.db` 用于检测尾部截断；设置环境变量 `CAMTY_AUDIT_KEY` 后条目追加 HMAC-SHA256，可检测"篡改全部记录并重算整条链"。无 key、无锚点时仅能检测局部编辑。
 
 **面板**：`uvicorn camty.api.app:app --port 8090` → 仪表盘 / 台账 / 资产覆盖力导向图 / 攻击链 / 流量回放 / 探索图 / 审批队列，页头输入框随时注入转向指令（人在环路）。
 
@@ -102,7 +104,7 @@ curl -X POST localhost:8895/req -H "Content-Type: application/json" \
 - 范围白名单外的目标一律拒绝（含 DNS 解析校验防"形似目标"）
 - 利用级动作必须引用台账已验证发现，否则引擎拒绝执行
 - 破坏性动作规则门 deny（删除类接口/SQL 破坏语句/危险 shell）
-- 全动作审计留痕，哈希链防篡改；测试凭据/会话不进仓库（.gitignore 强制）
+- 全动作审计留痕，哈希链 + seq + 可选 HMAC/锚点防篡改（无 key/锚点时仅能检测局部编辑；有 key/锚点可检测全量重算重写与尾部截断）；测试凭据/会话不进仓库（.gitignore 强制）
 
 ## 合规与免责声明
 
@@ -142,7 +144,7 @@ camty/
 │   │   └── state.py          #     Engagement + 血缘台账
 │   ├── guardrail/            #   治理层
 │   │   ├── scope.py          #     范围白名单（deny-by-default + DNS 校验 + 速率）
-│   │   ├── audit.py          #     审计哈希链（防篡改可回放）
+│   │   ├── audit.py          #     审计哈希链 + seq + 可选 HMAC/锚定（防篡改可回放）
 │   │   ├── rules.py          #     破坏性动作规则门（deny 规则库）
 │   │   ├── approval.py       #     三模式审批（交互/模型兜底/自动）
 │   │   ├── preauth.py        #     预授权队列（批量放行 + 审计）

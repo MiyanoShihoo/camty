@@ -119,9 +119,15 @@ class Engagement:
         self.context.update(self.db.load_context())
         self.ledger.findings = [Finding(**f) for f in self.db.load_findings()]
 
+    def anchor_audit(self) -> None:
+        """把审计 (count, head_hash) 锚入 state.db，用于检测尾部截断。"""
+        count, head = self.audit.snapshot()
+        self.db.add_audit_anchor(count, head)
+
     def save_state(self) -> None:
         self.db.update_context(self.context)
         self.db.sync_findings([asdict(f) for f in self.ledger.findings])
+        self.anchor_audit()
 
     def mark_step(self, phase_id: str, step_index: int, status: str = "done") -> None:
         self.db.mark_step(phase_id, step_index, status)

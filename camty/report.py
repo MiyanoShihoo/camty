@@ -177,6 +177,7 @@ def write_report(eng: Engagement, path: str | Path | None = None) -> str:
     path = Path(path) if path else eng.dir / f"report-{time.strftime('%Y%m%d-%H%M%S')}.html"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_html(eng), encoding="utf-8")
+    eng.anchor_audit()  # 报告生成时锚定审计链（count, head_hash）
     return str(path)
 
 
@@ -310,8 +311,9 @@ def write_docx(eng: Engagement, path: str | Path | None = None) -> str:
         row[5].text = "是" if f.get("verified") else "否"
 
     doc.add_heading("动作审计", level=1)
-    ok_chain, bad = eng.audit.verify()
+    ok_chain, bad = eng.audit.verify(anchors=eng.db.load_audit_anchors())
     chain_desc = "完整（哈希链校验通过）" if ok_chain else f"断裂于第 {bad} 行"
     doc.add_paragraph(f"审计链: {chain_desc}；完整记录: {eng.audit.path}")
     doc.save(str(path))
+    eng.anchor_audit()  # 报告生成时锚定审计链（count, head_hash）
     return str(path)

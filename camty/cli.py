@@ -148,13 +148,19 @@ def cmd_repeater(args: argparse.Namespace) -> None:
 
 def cmd_audit(args: argparse.Namespace) -> None:
     eng = Engagement(args.engagement)
-    entries = eng.audit.entries()
-    ok, bad = eng.audit.verify()
-    if ok:
-        print(f"审计链完整：{len(entries)} 条记录（{eng.audit.path}）")
-    else:
-        print(f"审计链断裂：第 {bad} 行被修改/删除/插入（{eng.audit.path}）")
-        raise SystemExit(1)
+    try:
+        count, head = eng.audit.snapshot()
+        ok, bad = eng.audit.verify(anchors=eng.db.load_audit_anchors())
+        if ok:
+            print(f"审计链完整：{count} 条记录（{eng.audit.path}）")
+        else:
+            print(f"审计链断裂：第 {bad} 行被修改/删除/插入（{eng.audit.path}）")
+        # 当前 (count, head_hash) 供外部安全存档（离线锚点，防 state.db 一并被改）
+        print(f"外部锚点存档 (count, head_hash)：({count}, {head})")
+        if not ok:
+            raise SystemExit(1)
+    finally:
+        eng.close()
 
 
 def cmd_retest(args: argparse.Namespace) -> None:

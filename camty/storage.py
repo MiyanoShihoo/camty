@@ -91,6 +91,12 @@ CREATE TABLE IF NOT EXISTS blackboard (
     source TEXT,
     created_ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audit_anchor (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_count INTEGER NOT NULL,
+    head_hash TEXT NOT NULL DEFAULT '',
+    created_ts TEXT NOT NULL
+);
 """
 
 
@@ -393,6 +399,28 @@ class StateDB:
                     "WHERE kind = ? ORDER BY id DESC LIMIT ?", (kind, limit)).fetchall()
         return [
             {"id": r[0], "kind": r[1], "note": r[2], "source": r[3], "created_ts": r[4]}
+            for r in rows
+        ]
+
+    # ---- 审计锚定 ----
+
+    def add_audit_anchor(self, count: int, head_hash: str) -> None:
+        """追加审计锚点 (count, head_hash)：哈希链对尾部截断天然不敏感，
+        锚点把"校验时刻的链长与链头"固化下来，供 verify 比对。"""
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO audit_anchor (entry_count, head_hash, created_ts) VALUES (?, ?, ?)",
+                (int(count), str(head_hash), time.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            self.conn.commit()
+
+    def load_audit_anchors(self) -> list[dict]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT id, entry_count, head_hash, created_ts FROM audit_anchor ORDER BY id"
+            ).fetchall()
+        return [
+            {"id": r[0], "count": r[1], "head_hash": r[2], "created_ts": r[3]}
             for r in rows
         ]
 

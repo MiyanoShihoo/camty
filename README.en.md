@@ -19,13 +19,13 @@ English | [简体中文](README.md)
 
 ## What It Is
 
-Camty is an **auditable red-team engagement workbench**: it puts every action of a penetration test — recon & mapping, vulnerability verification, privilege escalation, lateral movement, evidence archiving, report generation — onto one pipeline, with scope guardrails, a tamper-evident audit hash chain, and an evidence ledger, so **every step is compliant, replayable, and deliverable**.
+Camty is an **auditable red-team engagement workbench**: it puts every action of a penetration test — recon & mapping, vulnerability verification, privilege escalation, lateral movement, evidence archiving, report generation — onto one pipeline, with scope guardrails, an audit hash chain (with optional HMAC and anchoring for tamper evidence), and an evidence ledger, so **every step is compliant, replayable, and deliverable**.
 
 It is at once a toolbox (41 structured adapters), a command console (multi-agent engine + web panel), and an archive (dual-graph cognition + lineage ledger + three-format reports).
 
 ## Strengths
 
-**1. Evidence-chain-first governance.** Deny-by-default scope whitelist (DNS-resolution checked), per-action JSONL audit with hash chaining (tamper-evident, replayable), exploitation actions hard-gated on verified findings by ID, findings carry lineage (`F-003 ← F-001` shows exactly where an exploit chain came from).
+**1. Evidence-chain-first governance.** Deny-by-default scope whitelist (DNS-resolution checked), per-action JSONL audit with hash chaining (local edits always break the chain; with `CAMTY_AUDIT_KEY` or saved anchors it also detects full-rewrite-with-recompute and tail truncation; replayable), exploitation actions hard-gated on verified findings by ID, findings carry lineage (`F-003 ← F-001` shows exactly where an exploit chain came from).
 
 **2. 41 structured adapters.** External tools (subfinder/httpx/nuclei/fscan) + purpose-built weapons (js-recon frontend mapping, inj-probe multi-carrier injection with 7 evasion variants, authz-probe authorization matrix, code-audit white-box, mail-code OTP retrieval, osint-recon target profiling, cve-intel CVE matching, hashcrack GPU cracking) + full AD suite (13 impacket tools + 5 lateral engines) + C2 trio. Tool output flows into the ledger and asset graph automatically.
 
@@ -71,8 +71,10 @@ python -m camty engine engagements/my-target.yaml --agent --budget 30 --traffic
 
 # (3) Deliverables
 python -m camty report engagements/my-target.yaml --format html   # / docx / src
-python -m camty audit engagements/my-target.yaml                 # audit hash-chain check
+python -m camty audit engagements/my-target.yaml                 # audit hash-chain check (prints a (count, head_hash) anchor for external archival)
 ```
+
+**Audit tamper-evidence boundary**: the hash chain itself detects local edits (any change/deletion/insertion breaks it); `save_state` and report generation automatically anchor `(count, head_hash)` into `state.db` to detect tail truncation; setting the `CAMTY_AUDIT_KEY` environment variable appends an HMAC-SHA256 to each entry, detecting "rewrite every record and recompute the whole chain". Without a key or anchors, only local edits are detectable.
 
 **Panel**: `uvicorn camty.api.app:app --port 8090` — dashboard, ledger, force-directed asset coverage, attack chain, traffic replay, exploration graph, approval queue; the header input box injects steering messages at any time (human-in-the-loop).
 
@@ -97,7 +99,7 @@ curl -X POST localhost:8895/req -H "Content-Type: application/json" \
 - Anything outside the scope whitelist is refused (DNS-resolution checked against look-alike domains)
 - Exploit-grade actions must reference a verified ledger finding or the engine refuses
 - Destructive-action rule gates deny (delete-style endpoints / SQL destruction / dangerous shells)
-- Every action is audit-logged with a tamper-evident hash chain; test credentials/sessions never enter the repo (.gitignore enforced)
+- Every action is audit-logged with a hash chain + seq + optional HMAC/anchors for tamper evidence (without a key or anchors only local edits are detectable; with them, full-rewrite-with-recompute and tail truncation are detectable); test credentials/sessions never enter the repo (.gitignore enforced)
 
 ## Compliance & Disclaimer
 
@@ -137,7 +139,7 @@ camty/
 │   │   └── state.py          #     Engagement + lineage ledger
 │   ├── guardrail/            #   governance layer
 │   │   ├── scope.py          #     scope whitelist (deny-by-default + DNS check + rate)
-│   │   ├── audit.py          #     audit hash chain (tamper-evident, replayable)
+│   │   ├── audit.py          #     audit hash chain + seq + optional HMAC/anchoring (tamper-evident, replayable)
 │   │   ├── rules.py          #     destructive-action rule gates
 │   │   ├── approval.py       #     three-mode approvals (interactive/model-fallback/auto)
 │   │   ├── preauth.py        #     pre-authorization queue (bulk release + audit)
