@@ -5,6 +5,8 @@ fastapi>=0.110
 uvicorn>=0.27
 # HTTP 指纹伪装（可选，缺则回退 urllib）
 curl_cffi>=0.7
+# 密钥 vault 加密 + C2 协议加解密（vendor/ 里有缓存副本；vendor/ 不入库，fresh clone 由 pip 补齐）
+cryptography>=42
 # IMAP/浏览器等其余能力用标准库或可选 vendor：
 #   playwright（browser-* 适配器）: pip install playwright && playwright install chromium
 #   python-docx（--format docx）: pip install python-docx

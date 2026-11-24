@@ -167,6 +167,11 @@ class TestImpacketAdapters(unittest.TestCase):
         self.assertEqual(_vendor_root(script), str(base / "vendor"))
 
     def test_run_impacket_env(self):
+        # 平台原生路径构造（同 test_vendor_root 修法）：Windows 字面量在 Linux
+        # 上被当作单个文件名，PYTHONPATH 解析成无关目录导致断言失败。
+        import tempfile
+        from pathlib import Path
+
         captured = {}
 
         def fake_run(cmd, **kw):
@@ -174,10 +179,12 @@ class TestImpacketAdapters(unittest.TestCase):
             captured["env"] = kw["env"]
             return mock.MagicMock(returncode=0, stdout="ok", stderr="")
 
+        base = Path(tempfile.mkdtemp()).resolve()
+        script = str(base / "vendor" / "bin" / "GetNPUsers.py")
         with mock.patch("camty.adapters.impacket.subprocess.run", side_effect=fake_run):
-            code, output = run_impacket(r"E:\x\vendor\bin\GetNPUsers.py", ["-h"])
+            code, output = run_impacket(script, ["-h"])
         self.assertEqual(code, 0)
-        self.assertIn("vendor", captured["env"]["PYTHONPATH"])
+        self.assertIn(str(base / "vendor"), captured["env"]["PYTHONPATH"])
         self.assertTrue(captured["cmd"][0] == "python")
 
     def test_asreproast_parse_and_run(self):
