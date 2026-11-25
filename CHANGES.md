@@ -156,3 +156,36 @@
 
 ## R2 全量测试结果
 - 319（上轮终态）→ **326 passed**（+7：回归 1 + TLS 2 + API 鉴权 4），零既有失败。
+
+# R3 测试隔离与 CI 收尾
+
+## 步骤0 复现定性（干净 venv = CAMTY_NO_VENDOR=1 + 仅 requirements(+dev)，Windows 3.14.4）
+- 复现集合 ≠ 9：**14 failed + 4 errors + 1 skipped**，且与交战报告的 9 完全不相交——按规矩先回报差异清单，未强行凑定性。
+- **A1 簇（17 条）**：`starlette.testclient requires httpx2`——干净安装拉到新版 fastapi 0.165/starlette 1.10（requirements 未锁上界），TestClient 改依赖 httpx2，而它是未声明的 test-only 依赖。panel×10、ask×3、repeater-api×4。
+- **A2 簇（1 条）**：test_auto::test_full_auto_chain 的 docx 断言"可用时应出 docx"未做可用性门控，缺 python-docx 时直接红。
+- **交战报告的 9（8 artex 污染 + 1 asreproast）在本机 Windows 干净环境全绿**——指纹定案：
+  | 项 | 本机（win32） | 交战环境/CI（linux）推断 |
+  |---|---|---|
+  | getproxies() | {'http':'127.0.0.1:7897',…}（注册表系统代理，env 为空） | 仅 env，无系统代理 |
+  | proxy_bypass('127.0.0.1') | **True**（注册表 bypass 名单含 localhost） | **False**（no_proxy 未设） |
+  | curl_cffi | 0.17.0 在场（requirements 内） | 同 |
+  - 机制链：test_scope_enforcement 设 http_proxy 后调全局 urlopen → 代理焊进进程级 `urllib.request._opener` 缓存 → finally pop 救不回。Windows 下游打本地靶被 bypass 名单豁免 → 全绿；Linux localhost 也进死代理 → 8 连带红。asreproast 为工具发现路径的平台差异。**CI ubuntu 腿天然复现该场景**，是最终裁决。
+
+## 修复清单
+1. **P0 焊点（test_scope_enforcement）**：改显式 `ProxyHandler` 局部 opener（build_opener+opener.open），403 断言语义不变；env set/pop 删除，不再碰全局 opener。同文件 mitm 测试已是局部 opener，核验未动。
+2. **conftest 三件套（新建 tests/conftest.py，autouse）**：env 全量快照 → 收尾先采样代理四变量 → clear+update 恢复 → `urllib.request._opener = None`（私有属性，仅测试兜底）→ 泄漏则 pytest.fail 点名测试。正向验证：临时造漏恢复 http_proxy 的测试，teardown 即标红并报泄漏变量。
+3. **asreproast 可用性边界 mock**：`camty.adapters.base.find_tool`（非 spec 原文的 impacket 命名空间——该符号由 base.py:11 导入，按原文写会 AttributeError）返回伪路径；解析断言未动。mock 返回值用 POSIX 路径避开盘符守卫自伤。
+4. **test_auto docx 门控**：python-docx 可用性探针，可用断言产出、缺失断言不产出（原语义"可用时"补真），不 skip（其余断言保留覆盖）。
+5. **全 tests/ 排查清单（设代理 env + 全局 urlopen 交叉）**：除 P0 焊点外**无新焊点**；env 写入逐处核验——audit_chain/countermeasures/engine/platform/vault_fallback 均 mock.patch.dict 托管还原，repeater/panel/sidequestion 均 saved/restore 或 setUp/tearDown 模式正确，c2_implant 只读。
+6. **CI 矩阵（新建 .github/workflows/ci.yml）**：push+PR(main) × `ubuntu-latest/windows-latest` × Python 3.10/3.11/3.12/3.13 八腿，fail-fast=false，安装 `requirements.txt + requirements-dev.txt` 后全量 pytest；不预装任何外部工具（依赖声明缺口的永久探针）；无 allow-failure。YAML 细节：版本号加引号（裸 3.10 在 YAML 1.1 被 PyYAML 解析为浮点 3.1）。
+7. **requirements-dev.txt（新建）**：pytest>=8 + httpx2>=1（A1 根因——新版 starlette TestClient 的必需依赖）。
+8. **文档同步**：badge Python-3.12+ → 3.10+（双语）；快速开始补 dev 依赖行；支持底线声明"3.10–3.13（CI 矩阵在 Ubuntu/Windows 实测）"；AGENTS.md §0 补 dev 依赖安装。
+9. **双守卫**：tests/test_hygiene.py 盘符守卫（正则 [A-Z]:\ 扫全 tests/，命中即红；白名单项须含 skipUnless，当前为空）+ test_e2e_tools docstring 改写去盘符。注入验证：向 test_engine.py 注入 C:\guard\check → 守卫红并报文件:行 → 字节级还原后复绿。
+
+## 前后计数（干净 venv 口径）
+- 修复前：14 failed + 4 errors + 1 skipped（httpx2 簇 17 + docx 门控 1）
+- 修复后：**326 passed + 1 skipped（0 failed / 0 errors）**；主环境 327 passed。
+- 交战报告的 Linux 侧 8 污染 + 1 asreproast 由 CI ubuntu 腿作最终裁决（proxy_bypass 平台差异在本机不可复现，但机制已双保险修复：焊点摘除 + conftest 兜底）。
+
+## 偏差记录
+- find_tool patch 目标改 base 命名空间（见上）；mock 返回值 POSIX 化；conftest 收尾顺序改为"采样→恢复→清 opener→判红"（先恢复再比较会让断言恒真）；A2 不用 skip 而用条件断言（保留其余覆盖）；CI 版本号加引号。
