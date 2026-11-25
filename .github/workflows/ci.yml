@@ -9,6 +9,10 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    env:
+      # CI Windows 控制台默认 cp1252，中文输出（CLI/编排器/C2 启动横幅）直接
+      # UnicodeEncodeError 崩掉子进程——UTF-8 模式下子进程继承，全平台一致
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:

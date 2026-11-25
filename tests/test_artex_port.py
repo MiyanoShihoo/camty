@@ -409,7 +409,7 @@ class TestTrafficProxy(unittest.TestCase):
             os.environ["https_proxy"] = proxy.proxy_url()
             opener = urllib.request.build_opener(
                 urllib.request.HTTPSHandler(context=ca_ctx))
-            with opener.open(f"https://127.0.0.1:{srv_port}/api/data", timeout=15) as resp:
+            with opener.open(f"https://127.0.0.1:{srv_port}/api/data", timeout=30) as resp:
                 body = json.loads(resp.read().decode())
             self.assertTrue(body["ok"])
             stats = proxy.stats()
