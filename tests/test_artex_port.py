@@ -432,14 +432,15 @@ class TestTrafficProxy(unittest.TestCase):
         proxy = TrafficProxy(self.eng, port=0)
         proxy.start()
         try:
-            import os
-
-            os.environ["http_proxy"] = proxy.proxy_url()
+            # 用显式 ProxyHandler 的局部 opener，不碰全局 opener 也不碰
+            # os.environ：urllib.request.urlopen 首次调用会把代理 env 焊进
+            # 进程级 _opener 缓存，env pop 救不回来，会污染后续测试。
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy.proxy_url()}))
             with self.assertRaises(urllib.error.HTTPError) as ctx:
-                urllib.request.urlopen("http://203.0.113.9/x", timeout=10)
+                opener.open("http://203.0.113.9/x", timeout=10)
             self.assertEqual(ctx.exception.code, 403)
         finally:
-            os.environ.pop("http_proxy", None)
             proxy.stop()
 
 
