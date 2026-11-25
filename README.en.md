@@ -10,7 +10,7 @@ English | [简体中文](README.md)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-330%20passed-brightgreen)
-![Adapters](https://img.shields.io/badge/adapters-41-orange)
+![Adapters](https://img.shields.io/badge/adapters-42-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-black)
 
 </div>

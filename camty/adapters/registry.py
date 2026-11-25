@@ -10,6 +10,7 @@ from camty.adapters.code_audit import CodeAuditAdapter
 from camty.adapters.cred_test import CredTestAdapter
 from camty.adapters.cve_intel import CveIntelAdapter
 from camty.adapters.evidence_search import EvidenceSearchAdapter
+from camty.adapters.skill_lookup import SkillLookupAdapter
 from camty.adapters.hashcrack import HashcrackAdapter
 from camty.adapters.fscan import FscanAdapter
 from camty.adapters.httpx import HttpxAdapter
@@ -51,6 +52,7 @@ _ADAPTERS: list[ToolAdapter] = [
     DirScanAdapter(),
     JsReconAdapter(),
     EvidenceSearchAdapter(),
+    SkillLookupAdapter(),
     CveIntelAdapter(),
     HashcrackAdapter(),
     OsintAdapter(),
