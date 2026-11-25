@@ -104,7 +104,16 @@ class TestOrchestrator(unittest.TestCase):
         reports = list((eng.dir).glob("report-*.html"))
         self.assertTrue(reports, "结束应自动生成报告")
         docx = list((eng.dir).glob("report-*.docx"))
-        self.assertTrue(docx, "python-docx 可用时应同时出 docx")
+        # docx 报告依赖 python-docx；缺它时产 HTML 不产 docx，断言应跟可用性对齐
+        try:
+            import docx  # noqa: F401
+            docx_available = True
+        except ImportError:
+            docx_available = False
+        if docx_available:
+            self.assertTrue(docx, "python-docx 可用时应同时出 docx")
+        else:
+            self.assertEqual(docx, [], "缺 python-docx 时不应生成 docx")
 
     def test_resume_idempotent(self):
         eng = self.eng()

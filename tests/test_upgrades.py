@@ -193,7 +193,17 @@ class TestImpacketAdapters(unittest.TestCase):
         out = "$krb5asrep$bob@CORP.LOCAL:8f2a...hash"
         self.assertTrue(ASREP_HASH_RE.search(out))
         fake_output = "$krb5asrep$alice@CORP.LOCAL:abcdef0123\n"
-        with mock.patch("camty.adapters.impacket.run_impacket", return_value=(0, fake_output)):
+        # 可用性边界：run 前置 binary() → find_tool，无 impacket 的环境会以
+        # ToolUnavailable 短路，走不到被 mock 的执行段（Linux/CI 红、Windows
+        # 因工具发现路径不同而绿的平台差异）。一并 mock find_tool 让执行段
+        # 可达；patch 目标是 base 命名空间（find_tool 由 camty.adapters.base
+        # 导入并调用，impacket.py 自身无该符号）。返回值内容无所谓——
+        # run_impacket 已被 mock，不会真实执行；用无盘符路径以符合
+        # test_hygiene 的盘符守卫。
+        with mock.patch("camty.adapters.base.find_tool",
+                        return_value="/fake/vendor/bin/GetNPUsers.py"), \
+             mock.patch("camty.adapters.impacket.run_impacket",
+                        return_value=(0, fake_output)):
             result = adapter.run(
                 {"dc_ip": "10.10.10.1", "domain": "corp.local",
                  "domain_user": "u", "domain_pass": "p"},
