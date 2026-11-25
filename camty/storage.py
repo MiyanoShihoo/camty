@@ -338,9 +338,20 @@ class StateDB:
         后提交者会以自己读到的旧快照覆盖前者（丢失更新，PoC 强制切换下 270/300 复现）。
         单条 UPDATE 由 sqlite 保证原子，无跨线程覆盖窗口。
         note 语义与旧版一致：仅当显式传入时才覆写。
+        blocked 时同时释放 intent_id：blocked intent 不再占用 item 的派发位，
+        规划者可重派（历史意图节点保留在探索图，MAX_RESPAWN 防死循环）。
         """
         with self._lock:
-            if note:
+            if status == "blocked":
+                if note:
+                    self.conn.execute(
+                        "UPDATE todolist SET status = ?, note = ?, intent_id = NULL WHERE item_id = ?",
+                        (status, note, item_id))
+                else:
+                    self.conn.execute(
+                        "UPDATE todolist SET status = ?, intent_id = NULL WHERE item_id = ?",
+                        (status, item_id))
+            elif note:
                 self.conn.execute(
                     "UPDATE todolist SET status = ?, note = ? WHERE item_id = ?",
                     (status, note, item_id))

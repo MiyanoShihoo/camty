@@ -204,10 +204,12 @@ class Engine:
 
         steer_notes = take_pending(self.eng)
         blackboard = Blackboard(self.eng).summary()
+        mission = str((self.eng.cfg.get("objective") or {}).get("mission", ""))
         prompt = (
             (as_prompt(steer_notes) + "\n" if steer_notes else "")
             + f"交战目标: {goal['title']}\n"
-            f"资产覆盖: {self.eng.assets.summary()}\n"
+            + ("任务全文:\n" + mission[:900] + "\n" if mission else "")
+            + f"资产覆盖: {self.eng.assets.summary()}\n"
             f"台账:\n{ledger_digest(self.eng)}\n"
             f"当前 todolist:\n{self.todolist.summary()[:1000]}\n"
             f"探索图态势: {json.dumps(self.graph.overview()['counts'], ensure_ascii=False)}\n"
@@ -245,6 +247,11 @@ class Engine:
                 "intent_id": prev.get("intent_id"),
                 "note": str(item.get("note", prev.get("note", ""))),
             })
+        # 空计划守卫：LLM 输出空/全无效 todolist 时不得清空既有计划（BUG-06 实录：
+        # 91 步积累的 T1-T6 全链被一次空输出抹掉，下一轮被迫重新规划）
+        if not merged and existing:
+            print("[plan] LLM 输出空 todolist，保留既有计划不覆写")
+            return
         self.todolist.replace(merged)
 
     def _pack_plan(self, goal: dict) -> None:
@@ -438,10 +445,11 @@ class Engine:
             {"role": "user", "content": f"开始执行意图: {intent['title']}"},
         ]
         digest_parts = []
+        real_calls = 0  # 真实适配器调用计数（叙事不算产出，BUG-08）
         for step_i in range(PER_INTENT_STEPS):
             if self._steps >= self.max_total_steps:
                 return (bool(digest_parts), "预算耗尽: " + "; ".join(digest_parts[-2:]))
-            resp = self.router.chat(ROLE_DECIDE, messages, tools, timeout=WORKER_TIMEOUT)
+            resp = self._chat_with_retry(messages, tools)
             messages.append({"role": "assistant", "content": resp["content"],
                              "tool_calls": resp.get("tool_calls") or []})
             if not resp.get("tool_calls"):
@@ -451,6 +459,8 @@ class Engine:
                 break
             for tc in resp["tool_calls"]:
                 self._steps += 1
+                if tc.get("name") in self.registry:
+                    real_calls += 1
                 content = self._execute_tool_call(node_id, step_i, tc)
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": content})
                 from camty.guardrail.steer import as_prompt, take_pending
@@ -459,8 +469,24 @@ class Engine:
                 if notes:
                     messages.append({"role": "user", "content": as_prompt(notes)})
                     print(f"[steer] {node_id} 收到 operator 转向: {notes[0]['message'][:60]}")
-        ok = bool(digest_parts) or self._intent_produced(intent)
+        ok = self._intent_produced(intent, real_calls)
         return ok, "; ".join(digest_parts) or "（无总结输出）"
+
+    def _chat_with_retry(self, messages: list, tools: list) -> dict:
+        """worker 决策调用带一次重试（BUG-03：供应商瞬时抖动不应整杀 worker）。
+
+        规划者已有 3 次失败降级路径；worker 循环原先零重试——一次超时即把
+        整个意图打成 blocked（实验实录：I-005 首枪未发即死于 120s 超时）。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                return self.router.chat(ROLE_DECIDE, messages, tools, timeout=WORKER_TIMEOUT)
+            except Exception as exc:  # noqa: BLE001 - 二次失败才上抛
+                last_exc = exc
+                if attempt == 0:
+                    print(f"[worker] LLM 调用失败，重试 1/2: {str(exc)[:120]}")
+        raise last_exc
 
     def _execute_tool_call(self, node_id: str, step_i: int, tc: dict) -> str:
         name = tc["name"]
@@ -506,9 +532,15 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - 单工具失败不终止意图
             return self._tool_content_json({"error": str(exc)})
 
-    def _intent_produced(self, intent: dict) -> bool:
-        """意图是否有产出（工具循环无总结时兜底判断）。"""
-        return bool(intent)
+    def _intent_produced(self, intent: dict, real_calls: int = 0) -> bool:
+        """意图是否有真实产出（BUG-08：完成是验证状态，不是叙事状态）。
+
+        旧实现 `return bool(intent)` 恒真——worker 只输出总结文本即可换 done
+        （实验实录：三个阶段自述完成、平台 0/3）。现在 done 要求本意图
+        实际调用过真实适配器（search-traces/blackboard-note 不算）；纯叙事
+        无动作 → not produced → blocked → 规划者可重派（intent_id 已释放）。
+        """
+        return real_calls > 0
 
     @staticmethod
     def _tool_content_json(payload: dict) -> str:
