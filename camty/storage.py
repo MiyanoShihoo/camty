@@ -331,6 +331,25 @@ class StateDB:
 
     # ---- 共享 todolist ----
 
+    def mark_todolist_item(self, item_id: str, status: str, note: str = "") -> None:
+        """单条原子更新（并发安全）。
+
+        旧路径是 load→内存改→DELETE 全表+重插（RMW）：两线程并发 mark 不同项时，
+        后提交者会以自己读到的旧快照覆盖前者（丢失更新，PoC 强制切换下 270/300 复现）。
+        单条 UPDATE 由 sqlite 保证原子，无跨线程覆盖窗口。
+        note 语义与旧版一致：仅当显式传入时才覆写。
+        """
+        with self._lock:
+            if note:
+                self.conn.execute(
+                    "UPDATE todolist SET status = ?, note = ? WHERE item_id = ?",
+                    (status, note, item_id))
+            else:
+                self.conn.execute(
+                    "UPDATE todolist SET status = ? WHERE item_id = ?",
+                    (status, item_id))
+            self.conn.commit()
+
     def sync_todolist(self, items: list[dict]) -> None:
         with self._lock:
             self.conn.execute("DELETE FROM todolist")

@@ -136,13 +136,9 @@ class Todolist:
         return self.db.load_todolist()
 
     def mark(self, item_id: str, status: str, note: str = "") -> None:
-        items = self.items()
-        for item in items:
-            if item["item_id"] == item_id:
-                item["status"] = status
-                if note:
-                    item["note"] = note
-        self.db.sync_todolist(items)
+        # 并发安全：引擎多 worker 会并发 mark 不同项——RMW（load→改→全表重插）
+        # 会让后提交者覆盖前者的状态更新，必须走单条原子 UPDATE。
+        self.db.mark_todolist_item(item_id, status, note)
 
     def ready_items(self) -> list[dict]:
         """前置已完成的 pending 项。F- 开头为台账事实（非任务）——视为已满足。"""

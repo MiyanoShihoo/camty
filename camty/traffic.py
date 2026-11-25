@@ -259,7 +259,7 @@ class TrafficProxy:
         if not self._scope_ok(host):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
-        _recv_until(client, b"\r\n\r\n")  # 排空 CONNECT 请求剩余头，避免污染 TLS 握手
+        _drain_connect_headers(client)  # 排空 CONNECT 剩余头（裸/带头双形态），避免污染 TLS 握手
         client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         # MITM：以叶子证书把隧道降级为明文 HTTP
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -328,6 +328,25 @@ class TrafficProxy:
 
 
 # ---- 原始套接字 HTTP 解析 ----
+
+def _drain_connect_headers(sock) -> None:
+    """排空 CONNECT 请求首行之后的剩余字节。
+
+    客户端两种形态都要接得住：
+    - 带隧道头（CPython 3.12+ urllib 发 Host）：剩余 = "Host: ...\r\n\r\n"
+    - 裸 CONNECT（≤3.11 urllib tunnel_headers={}）：剩余恰为 "\r\n"
+    旧实现按 "\r\n\r\n" 找终止符，裸形态下永远等不齐——代理等字节、客户端等
+    200，双向死锁（CI 3.10/3.11 四腿两轮确定复现）。
+    """
+    buf = b""
+    while True:
+        if buf == b"\r\n" or buf.endswith(b"\r\n\r\n") or len(buf) > 8192:
+            return
+        chunk = sock.recv(4096)
+        if not chunk:
+            return
+        buf += chunk
+
 
 def _recv_until(sock, marker: bytes, limit: int = 65536) -> bytes:
     buf = b""

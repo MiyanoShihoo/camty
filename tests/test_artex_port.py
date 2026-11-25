@@ -468,6 +468,84 @@ class TestTrafficLeftoverPlumbing(unittest.TestCase):
             a.close()
 
 
+class TestConnectDrainShapes(unittest.TestCase):
+    """CONNECT 排空必须双形态兼容：带隧道头（3.12+ urllib）与裸 CONNECT（≤3.11）。
+
+    旧实现按 "\r\n\r\n" 找终止符，裸形态剩余恰为 "\r\n" → 永等不齐 → 双向死锁。
+    死锁在测试里表现为 socket 超时（settimeout 兜底），而不是挂死测试进程。
+    """
+
+    def _drain_roundtrip(self, raw: bytes):
+        import socket as socket_mod
+        from camty.traffic import _drain_connect_headers, _read_line
+
+        a, b = socket_mod.socketpair()
+        try:
+            b.sendall(raw)
+            b.close()
+            a.settimeout(5)  # 若实现退化为阻塞死锁，5s 后 timeout 使测试快速失败
+            first = _read_line(a)
+            self.assertTrue(first.startswith(b"CONNECT"))
+            _drain_connect_headers(a)  # 死锁形态下这里抛 socket.timeout
+        finally:
+            a.close()
+
+    def test_drain_with_tunnel_headers(self):
+        self._drain_roundtrip(b"CONNECT 127.0.0.1:8443 HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n")
+
+    def test_drain_bare_connect(self):
+        self._drain_roundtrip(b"CONNECT 127.0.0.1:8443 HTTP/1.0\r\n\r\n")
+
+
+class TestTodolistMarkConcurrency(unittest.TestCase):
+    """并发 mark 不得丢失更新（引擎多 worker 会并发写 todolist）。
+
+    旧 RMW 实现（load→改→DELETE 全表重插）在放大调度密度下 270/300 丢失
+    （PoC 实测）；修复后单条 UPDATE 原子，任意切换密度零丢失。
+    """
+
+    ROUNDS = 200
+
+    def test_no_lost_update_under_concurrent_marks(self):
+        import sys as sys_mod
+        import threading
+
+        from camty.agent.explore import Todolist
+
+        tmp = tempfile.mkdtemp()
+        eng = make_eng(tmp)
+        try:
+            items = [{"item_id": f"T{i}", "title": f"t{i}", "depends_on": [],
+                      "status": "pending"} for i in range(1, 4)]
+            todo = Todolist(eng)
+            todo.replace(items)
+            old_interval = sys_mod.getswitchinterval()
+            sys_mod.setswitchinterval(1e-6)  # 放大竞态窗口（模拟满载 CI 调度密度）
+            try:
+                for _ in range(self.ROUNDS):
+                    todo.replace(items)  # 重置为全 pending
+                    barrier = threading.Barrier(3)
+
+                    def worker(item_id):
+                        barrier.wait()
+                        todo.mark(item_id, "done", note=f"n-{item_id}")
+
+                    threads = [threading.Thread(target=worker, args=(f"T{i}",))
+                               for i in range(1, 4)]
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join()
+                    states = {i["item_id"]: i["status"] for i in todo.items()}
+                    self.assertEqual(
+                        {s: "done" for s in ("T1", "T2", "T3")}, states,
+                        "并发 mark 丢失更新（RMW 覆盖回归）")
+            finally:
+                sys_mod.setswitchinterval(old_interval)
+        finally:
+            eng.close()
+
+
 class TestNotify(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
