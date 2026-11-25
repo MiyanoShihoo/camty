@@ -1,12 +1,20 @@
-"""模块级测试：sqli-probe（本地靶机）与 int-ad 适配器解析器（fixture）。"""
+"""模块级测试：sqli-probe（本地靶机）与 int-ad 适配器解析器（fixture）。
+
+适配器透明度批次：browser 动作摘要透出（fake playwright 页对象）、
+skill-lookup 中英别名展开（夹具技能目录）、dir-scan findings 归一化去重（mock scan）。
+"""
 
 from __future__ import annotations
 
 import http.server
 import json
+import os
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
+from unittest import mock
 
 from camty.adapters.cred_test import parse_nxc_auth
 from camty.adapters.fscan import parse_fscan
@@ -214,6 +222,367 @@ class TestC2Adapters(unittest.TestCase):
 
             with self.assertRaises(C2Error):
                 C2SessionsAdapter().run({}, ctx)
+
+
+# ---------------------------------------------------------------------------
+# F-07：browser-action digest 逐动作透出（goto 哪里 / 点了什么 / 填了什么字段）
+# ---------------------------------------------------------------------------
+
+class _FakeBrowserResponse:
+    def __init__(self, status=200, headers=None):
+        self.status = status
+        self.headers = dict(headers or {})
+
+
+class _FakeKeyboard:
+    def press(self, key):
+        pass
+
+
+class _FakeBrowserPage:
+    """最小 playwright Page 假体：只实现 browser 适配器用到的方法。"""
+
+    def __init__(self, title="Example Home", url="https://example.com/home", dom=None):
+        self._title = title
+        self.url = url
+        self.dom = dom or {}
+        self.keyboard = _FakeKeyboard()
+        self.frames = []
+        self.context = mock.MagicMock()
+
+    def title(self):
+        return self._title
+
+    def inner_text(self, selector):
+        return "page body text"
+
+    def goto(self, url, **kwargs):
+        self.url = url
+        return _FakeBrowserResponse(200)
+
+    def fill(self, selector, value, **kwargs):
+        pass
+
+    def click(self, selector, **kwargs):
+        pass
+
+    def press(self, selector, key, **kwargs):
+        pass
+
+    def wait_for_selector(self, selector, **kwargs):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def screenshot(self, path=None, full_page=True):
+        Path(path).write_bytes(b"png")
+
+    def eval_on_selector_all(self, selector, script):
+        return self.dom.get(selector, [])
+
+    def get_attribute(self, selector, attr):
+        return "attr-value"
+
+
+class _FakeBrowserContext:
+    def __init__(self, page):
+        self._page = page
+
+    def new_page(self):
+        return self._page
+
+    def add_init_script(self, script):
+        pass
+
+
+class _FakeBrowser:
+    def __init__(self, context):
+        self._context = context
+        self.closed = False
+
+    def new_context(self, **kwargs):
+        return self._context
+
+    def close(self):
+        self.closed = True
+
+
+class _FakePlaywright:
+    """`with _playwright() as p: p.chromium.launch(...)` 的最小假体。"""
+
+    def __init__(self, browser):
+        self.chromium = self
+        self._browser = browser
+
+    def launch(self, **kwargs):
+        return self._browser
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class TestBrowserActionDigest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _ctx(self):
+        eng = mock.MagicMock()
+        eng.dir = Path(self.tmp)
+        eng.context = {"proxy": ""}
+        return RunContext(
+            Scope({"domains": ["example.com"], "min_interval_seconds": 0}),
+            Audit(Path(self.tmp) / "audit.jsonl"), Path(self.tmp) / "evidence", eng=eng)
+
+    def _run(self, args: dict, adapter_cls, page=None):
+        page = page or _FakeBrowserPage()
+        pw = _FakePlaywright(_FakeBrowser(_FakeBrowserContext(page)))
+        with mock.patch("camty.adapters.browser._playwright", return_value=pw):
+            return adapter_cls().run(args, self._ctx())
+
+    def test_action_digest_visibility_and_value_truncation(self):
+        long_value = "A" * 80
+        actions = [
+            {"type": "goto", "url": "https://example.com/login"},
+            {"type": "fill", "selector": "#username", "value": "alice@example.com"},
+            {"type": "fill", "selector": "#password", "value": long_value},
+            {"type": "click", "selector": "button[type=submit]"},
+            {"type": "screenshot"},
+        ]
+        from camty.adapters.browser import BrowserActionAdapter
+
+        result = self._run({"actions": actions}, BrowserActionAdapter)
+        # summary 逐动作可见：URL/选择器全可见，值截断
+        self.assertIn("goto:https://example.com/login", result.summary)
+        self.assertIn("fill:#username=alice@example.com", result.summary)
+        self.assertIn("click:button[type=submit]", result.summary)
+        self.assertIn("screenshot", result.summary)
+        self.assertIn(f"fill:#password={'A' * 30}", result.summary)
+        self.assertNotIn("A" * 40, result.summary)
+        self.assertNotIn("A" * 40, json.dumps(result.data, ensure_ascii=False))
+        # data.actions 结构化数组：type/target/value摘要/ok/状态码
+        entries = result.data["actions"]
+        self.assertEqual([e["type"] for e in entries],
+                         ["goto", "fill", "fill", "click", "screenshot"])
+        self.assertEqual(entries[0]["target"], "https://example.com/login")
+        self.assertEqual(entries[0]["status"], 200)
+        self.assertTrue(entries[0]["ok"])
+        self.assertEqual(entries[1]["target"], "#username")
+        self.assertEqual(entries[1]["value"], "alice@example.com")
+        self.assertEqual(entries[2]["value"], "A" * 30, "fill 值摘要应截断 30 字符")
+        self.assertEqual(entries[3]["target"], "button[type=submit]")
+        self.assertTrue(all(e["ok"] for e in entries))
+        # 紧凑摘要列表 + 旧 actions_log 兼容保留
+        self.assertEqual(result.data["actions_digest"], [
+            "goto:https://example.com/login",
+            "fill:#username=alice@example.com",
+            f"fill:#password={'A' * 30}",
+            "click:button[type=submit]",
+            "screenshot",
+        ])
+        self.assertEqual(len(result.data["actions_log"]), 5)
+
+    def test_digest_covers_all_action_kinds(self):
+        actions = [
+            {"type": "goto", "url": "https://example.com/login"},
+            {"type": "press", "selector": "#username", "key": "Enter"},
+            {"type": "press", "key": "Tab"},
+            {"type": "wait_selector", "selector": ".dashboard"},
+            {"type": "wait", "ms": 500},
+            {"type": "extract_text", "selector": "#profile"},
+            {"type": "extract_attr", "selector": "a.logout", "attr": "href"},
+        ]
+        from camty.adapters.browser import BrowserActionAdapter
+
+        result = self._run({"actions": actions}, BrowserActionAdapter)
+        expected = [
+            "goto:https://example.com/login",
+            "press:#username+Enter",
+            "press:Tab",
+            "wait_selector:.dashboard",
+            "wait:500ms",
+            "extract_text:#profile",
+            "extract_attr:a.logout@href",
+        ]
+        self.assertEqual(result.data["actions_digest"], expected)
+        self.assertIn(", ".join(expected), result.summary)
+        entries = result.data["actions"]
+        self.assertEqual(len(entries), 7)
+        self.assertTrue(all(e["ok"] for e in entries))
+        self.assertEqual(entries[5]["target"], "#profile")
+        self.assertIn("chars", entries[5], "extract_text 记录字符数")
+
+    def test_summary_and_audit_note_carry_digest(self):
+        from camty.adapters.browser import BrowserActionAdapter
+
+        actions = [{"type": "fill", "selector": "#q", "value": "x"}]
+        result = self._run({"actions": actions, "start_url": "https://example.com/search"},
+                           BrowserActionAdapter)
+        self.assertIn("执行 1 个动作", result.summary)
+        self.assertIn("最终页", result.summary)
+        self.assertIn("https://example.com/search", result.summary)
+        self.assertEqual(result.data["start_url"], "https://example.com/search")
+        notes = [e.get("note", "") for e in Audit(Path(self.tmp) / "audit.jsonl").entries()]
+        self.assertTrue(any("fill:#q=x" in n for n in notes), "审计 note 应含动作摘要")
+
+    def test_visit_summary_surfaces_forms_and_inputs(self):
+        from camty.adapters.browser import BrowserVisitAdapter
+
+        page = _FakeBrowserPage(title="Member Portal", url="https://example.com/")
+        page.dom = {
+            "a[href]": ["https://example.com/profile"],
+            "form": [{"action": "https://example.com/login", "method": "post",
+                      "fields": [{"name": "user", "type": "text"}]}],
+            "input,textarea": [{"name": "user", "type": "text"}],
+            "script[src]": ["https://example.com/app.js"],
+        }
+        result = self._run({"url": "https://example.com/"}, BrowserVisitAdapter, page=page)
+        self.assertIn("Member Portal", result.summary)
+        self.assertIn("1 链接", result.summary)
+        self.assertIn("1 表单/1 输入框", result.summary)
+        self.assertIn("状态 200", result.summary)
+        self.assertEqual(result.data["page"]["forms"][0]["method"], "post")
+
+
+# ---------------------------------------------------------------------------
+# F-04：skill-lookup 中英术语别名表——英文主题命中中文技能库
+# ---------------------------------------------------------------------------
+
+class TestSkillLookupBilingual(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _ctx(self):
+        return RunContext(
+            Scope({"domains": ["example.com"], "min_interval_seconds": 0}),
+            Audit(Path(self.tmp) / "audit.jsonl"), Path(self.tmp) / "evidence")
+
+    def _make_skill(self, name: str, text: str) -> Path:
+        d = Path(self.tmp) / "fixtures" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(text, encoding="utf-8")
+        return d.parent
+
+    def _run_topic(self, fixture_root: Path, topic: str):
+        from camty.adapters.skill_lookup import SkillLookupAdapter
+
+        adapter = SkillLookupAdapter()
+        with mock.patch.dict(os.environ, {"CAMTY_SKILL_EXTRA_DIRS": str(fixture_root)}):
+            return adapter.run({"topic": topic}, self._ctx())
+
+    def test_english_topic_hits_chinese_skill(self):
+        root = self._make_skill(
+            "zskill-passwd", "# 密码重置投毒\n重置投毒：操纵邮箱重置流程接管目标账号。")
+        result = self._run_topic(root, "password reset poisoning")
+        self.assertTrue(result.data["hits"], "英文主题应经别名命中中文技能")
+        top = result.data["hits"][0]
+        self.assertEqual(top["name"], "zskill-passwd")
+        self.assertEqual(top["matched"], "密码重置投毒", "别名命中应透出命中的别名")
+
+    def test_original_topic_ranks_above_alias(self):
+        root = self._make_skill("aaa-en-hit", "# deserialization guide\nJava deserialization chains.")
+        root = self._make_skill("mmm-both-hit", "# deserialization 与 反序列化\n两种术语都写。")
+        root = self._make_skill("zzz-cn-hit", "# 反序列化\nysoserial 利用链。")
+        result = self._run_topic(root, "deserialization")
+        names = [h["name"] for h in result.data["hits"]]
+        self.assertTrue(set(("aaa-en-hit", "mmm-both-hit", "zzz-cn-hit")) <= set(names))
+        self.assertEqual(names[0], "aaa-en-hit", "原名命中应排在别名命中前")
+        self.assertLess(names.index("aaa-en-hit"), names.index("zzz-cn-hit"))
+        self.assertEqual(names.count("mmm-both-hit"), 1, "同一技能只计一次")
+        both = next(h for h in result.data["hits"] if h["name"] == "mmm-both-hit")
+        self.assertEqual(both["matched"], "deserialization", "原名命中时 matched 为原名")
+
+    def test_chinese_topic_no_regression(self):
+        root = self._make_skill("zskill-cn", "# 反序列化\nysoserial 利用链。")
+        root = self._make_skill("zskill-en", "# deserialization guide\nJava chains.")
+        result = self._run_topic(root, "反序列化")
+        self.assertTrue(result.data["hits"], "中文主题检索不应回归")
+        top = result.data["hits"][0]
+        self.assertEqual(top["name"], "zskill-cn")
+        self.assertEqual(top["matched"], "反序列化")
+
+    def test_real_library_english_queries(self):
+        """真实仓库技能库：英文主题经别名命中含对应中文术语的技能。"""
+        repo_skills = Path(__file__).resolve().parent.parent / "skills"
+        if not repo_skills.is_dir():
+            self.skipTest("仓库 skills/ 目录不存在（打包环境）")
+        from camty.adapters.skill_lookup import SkillLookupAdapter
+
+        adapter = SkillLookupAdapter()
+        with mock.patch.dict(os.environ, {"CAMTY_SKILL_EXTRA_DIRS": ""}):
+            result = adapter.run({"topic": "password reset poisoning"}, self._ctx())
+        hits = result.data["hits"]
+        self.assertTrue(hits, "password reset poisoning 应命中含 密码重置 的技能")
+        self.assertEqual(hits[0]["matched"], "密码重置")
+
+        with mock.patch.dict(os.environ, {"CAMTY_SKILL_EXTRA_DIRS": ""}):
+            result = adapter.run({"topic": "deserialization"}, self._ctx())
+        self.assertTrue(result.data["hits"], "deserialization 应命中含 反序列化 的技能")
+        self.assertTrue(all(h["matched"] == "反序列化" for h in result.data["hits"]))
+
+
+# ---------------------------------------------------------------------------
+# F-05：dir-scan content-discovery findings 按归一化 URL 去重
+# ---------------------------------------------------------------------------
+
+class TestDirScanDedup(unittest.TestCase):
+    RAW = [
+        {"url": "https://example.com/Login", "status": 200, "length": 100,
+         "content_type": "text/html"},
+        {"url": "https://example.com/login", "status": 301, "length": 0, "content_type": ""},
+        {"url": "https://example.com/login", "status": 200, "length": 100,
+         "content_type": "text/html"},
+        {"url": "https://example.com/API/Users?z=1&a=2", "status": 200, "length": 50,
+         "content_type": "application/json"},
+        {"url": "https://example.com/api/users?a=2&z=1", "status": 200, "length": 50,
+         "content_type": "application/json"},
+        {"url": "https://example.com/admin", "status": 401, "length": 0, "content_type": ""},
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _run(self):
+        from camty.adapters.recon_web import DirScanAdapter
+
+        ctx = RunContext(
+            Scope({"domains": ["example.com"], "min_interval_seconds": 0}),
+            Audit(Path(self.tmp) / "audit.jsonl"), Path(self.tmp) / "evidence")
+        with mock.patch("camty.modules.dir_scan.scan", return_value=list(self.RAW)):
+            return DirScanAdapter().run({"base": "https://example.com/"}, ctx)
+
+    def test_case_and_query_variants_dedup_to_one(self):
+        result = self._run()
+        findings = result.data["findings"]
+        urls = [f["url"] for f in findings]
+        self.assertEqual(len(findings), 3, "大小写/重复/query 顺序变体折叠，不同路径保留")
+        self.assertEqual(len(urls), len(set(urls)))
+        self.assertEqual(urls[0], "https://example.com/Login", "同 URL 变体保留首个")
+        self.assertEqual(findings[0]["detail"]["status"], 200, "跨状态码保留首个")
+        self.assertIn("https://example.com/admin", urls)
+        severities = {f["url"]: f["severity"] for f in findings}
+        self.assertEqual(severities["https://example.com/API/Users?z=1&a=2"], "medium")
+        self.assertEqual(severities["https://example.com/admin"], "low")
+        self.assertEqual(len(result.data["discovered"]), 3)
+        self.assertIn("3 个非 fallback 路径", result.summary)
+
+    def test_repeated_run_dedups_each_time(self):
+        first = self._run()
+        second = self._run()
+        self.assertEqual(len(first.data["findings"]), len(second.data["findings"]))
+        self.assertEqual([f["url"] for f in first.data["findings"]],
+                         [f["url"] for f in second.data["findings"]])
+
+    def test_evidence_keeps_raw_scan_output(self):
+        result = self._run()
+        raw = Path(result.evidence).read_text(encoding="utf-8")
+        for url in ("https://example.com/Login", "https://example.com/login",
+                    "https://example.com/api/users?a=2&z=1"):
+            self.assertIn(url, raw, "证据文件保留原始扫描输出")
+        self.assertEqual(raw.count('"url"'), 6, "原始 6 条全量落档（证据不丢信息）")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from camty.adapters.base import RunContext, ToolAdapter, ToolResult
 EXTRACT_SUPPORT = "els => els.map(e => e.textContent && e.textContent.trim()).filter(Boolean)"
 MAX_TEXT = 6000
 MAX_LINKS = 200
+MAX_VALUE_DIGEST = 30  # fill 值摘要截断（防敏感数据长泄露；字段名/选择器/URL 不截断）
 MAX_BROWSER_PARALLEL = 2  # 并发 Chromium 实例上限（内存护栏，超出排队）
 _BROWSER_SEM = threading.BoundedSemaphore(MAX_BROWSER_PARALLEL)
 
@@ -191,6 +192,53 @@ def _page_digest(page) -> dict:
     return {"title": page.title(), "url": page.url, "text": text[:MAX_TEXT]}
 
 
+def _value_digest(value) -> str:
+    """fill 值摘要：前 MAX_VALUE_DIGEST 字符，超出截断（敏感值防长泄露）。"""
+    return str(value)[:MAX_VALUE_DIGEST]
+
+
+def _action_digest(kind: str, target: str | None = None, value=None) -> str:
+    """单动作紧凑摘要：目标全可见（URL/选择器/键名），值截断。
+
+    worker 与外部审计靠它看懂 browser-action 到底做了什么（goto 哪里、
+    点了什么、填了什么字段），否则完成判定失去依据。
+    """
+    if kind == "goto":
+        return f"goto:{target}"
+    if kind == "fill":
+        return f"fill:{target}={_value_digest(value)}"
+    if kind == "click":
+        return f"click:{target}"
+    if kind == "press":
+        return f"press:{target}+{value}" if target else f"press:{value}"
+    if kind == "wait_selector":
+        return f"wait_selector:{target}"
+    if kind == "wait":
+        return f"wait:{value}ms"
+    if kind == "screenshot":
+        return "screenshot"
+    if kind == "extract_text":
+        return f"extract_text:{target or 'body'}"
+    if kind == "extract_attr":
+        return f"extract_attr:{target}@{value}"
+    return str(kind)
+
+
+def _action_entry(kind: str, target: str | None = None, value=None,
+                  status: int | None = None, extra: dict | None = None) -> dict:
+    """结构化动作记录：type/target/value摘要/ok（执行到这里即成功；异常会中断整步）。"""
+    entry: dict = {"type": kind, "ok": True}
+    if target is not None:
+        entry["target"] = target
+    if value is not None:
+        entry["value"] = _value_digest(value) if kind == "fill" else value
+    if status is not None:
+        entry["status"] = status
+    if extra:
+        entry.update(extra)
+    return entry
+
+
 def _finish(result: ToolResult, page, ctx: RunContext, name: str,
             screenshots: list[str], extra_evidence: dict, save_session: bool,
             session_name: str = "default") -> ToolResult:
@@ -289,7 +337,8 @@ class BrowserVisitAdapter(ToolAdapter):
                         shots.append(_save_screenshot(ctx, self.name, page))
                     result = ToolResult(
                         summary=f"渲染 {digest['title'][:60]}（{len(data['links'])} 链接，"
-                                f"{len(data['forms'])} 表单，状态 {data['status']}）",
+                                f"{len(data['forms'])} 表单/{len(data['inputs'])} 输入框，"
+                                f"状态 {data['status']}）",
                         data={"page": data, "screenshots": shots},
                     )
                     result = _finish(result, page, ctx, self.name, shots,
@@ -373,49 +422,72 @@ class BrowserActionAdapter(ToolAdapter):
                     if args.get("start_url"):
                         page.goto(str(args["start_url"]), wait_until="domcontentloaded", timeout=timeout)
                     log: list[dict] = []
+                    entries: list[dict] = []      # 结构化逐动作记录（完成判定依据）
+                    digests: list[str] = []       # 紧凑摘要（summary/审计可见）
                     shots: list[str] = []
                     extracted: dict = {}
                     for act in actions:
                         kind = act.get("type", "")
+                        tgt = val = None
+                        status = None
+                        extra: dict = {}
                         if kind == "goto":
-                            page.goto(str(act["url"]), wait_until="domcontentloaded", timeout=timeout)
+                            resp = page.goto(str(act["url"]), wait_until="domcontentloaded",
+                                             timeout=timeout)
+                            status = resp.status if resp else None
+                            tgt = str(act["url"])
                             log.append({"type": "goto", "url": page.url})
                         elif kind == "fill":
-                            page.fill(str(act["selector"]), str(act.get("value", "")), timeout=timeout)
-                            log.append({"type": "fill", "selector": act["selector"]})
+                            tgt = str(act["selector"])
+                            val = str(act.get("value", ""))
+                            page.fill(tgt, val, timeout=timeout)
+                            log.append({"type": "fill", "selector": tgt})
                         elif kind == "click":
-                            page.click(str(act["selector"]), timeout=timeout)
-                            log.append({"type": "click", "selector": act["selector"]})
+                            tgt = str(act["selector"])
+                            page.click(tgt, timeout=timeout)
+                            log.append({"type": "click", "selector": tgt})
                         elif kind == "press":
-                            target = act.get("selector")
-                            if target:
-                                page.press(str(target), str(act.get("key", "Enter")), timeout=timeout)
+                            val = str(act.get("key", "Enter"))
+                            tgt = str(act["selector"]) if act.get("selector") else None
+                            if tgt:
+                                page.press(tgt, val, timeout=timeout)
                             else:
-                                page.keyboard.press(str(act.get("key", "Enter")))
-                            log.append({"type": "press", "key": act.get("key", "Enter")})
+                                page.keyboard.press(val)
+                            log.append({"type": "press", "key": val})
                         elif kind == "wait_selector":
-                            page.wait_for_selector(str(act["selector"]), timeout=timeout)
-                            log.append({"type": "wait_selector", "selector": act["selector"]})
+                            tgt = str(act["selector"])
+                            page.wait_for_selector(tgt, timeout=timeout)
+                            log.append({"type": "wait_selector", "selector": tgt})
                         elif kind == "wait":
-                            page.wait_for_timeout(int(act.get("ms", 1000)))
+                            val = int(act.get("ms", 1000))
+                            page.wait_for_timeout(val)
                             log.append({"type": "wait", "ms": act.get("ms", 1000)})
                         elif kind == "screenshot":
                             shots.append(_save_screenshot(ctx, self.name, page))
                             log.append({"type": "screenshot"})
                         elif kind == "extract_text":
-                            selector = act.get("selector", "body")
-                            text = page.inner_text(str(selector)) if selector else ""
-                            extracted[f"text:{selector}"] = text[:MAX_TEXT]
-                            log.append({"type": "extract_text", "selector": selector, "chars": len(text)})
+                            tgt = str(act.get("selector") or "body")
+                            text = page.inner_text(tgt) if act.get("selector") else ""
+                            extracted[f"text:{tgt}"] = text[:MAX_TEXT]
+                            extra = {"chars": len(text)}
+                            log.append({"type": "extract_text", "selector": tgt, "chars": len(text)})
                         elif kind == "extract_attr":
-                            val = page.get_attribute(str(act["selector"]), str(act.get("attr", "href")))
-                            extracted[f"attr:{act['selector']}@{act.get('attr', 'href')}"] = val
-                            log.append({"type": "extract_attr", "selector": act["selector"]})
+                            tgt = str(act["selector"])
+                            val = str(act.get("attr", "href"))
+                            extracted[f"attr:{tgt}@{val}"] = page.get_attribute(tgt, val)
+                            log.append({"type": "extract_attr", "selector": tgt})
+                        digests.append(_action_digest(kind, tgt, val))
+                        entries.append(_action_entry(kind, tgt, val, status, extra))
                     digest = _page_digest(page)
+                    digest_str = ", ".join(digests)
                     result = ToolResult(
-                        summary=f"执行 {len(actions)} 个动作，最终页 {digest['title'][:50]}（{digest['url']}）",
+                        summary=f"执行 {len(actions)} 个动作: {digest_str} → 最终页 "
+                                f"{digest['title'][:50]}（{digest['url']}）",
                         data={
+                            "start_url": args.get("start_url"),
                             "page": {**digest, **_extract_page(page)},
+                            "actions": entries,
+                            "actions_digest": digests,
                             "actions_log": log,
                             "extracted": extracted,
                             "screenshots": shots,
@@ -425,7 +497,7 @@ class BrowserActionAdapter(ToolAdapter):
                                      {"actions": actions}, bool(args.get("save_session")),
                                      session_name)
                     ctx.audit.record(self.name, {"n_actions": len(actions), "final_url": digest["url"]},
-                                     ok=True, note=digest["title"][:40])
+                                     ok=True, note=f"{digest_str} → {digest['title']}"[:200])
                     return result
                 finally:
                     browser.close()
