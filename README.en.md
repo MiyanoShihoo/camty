@@ -9,7 +9,7 @@
 English | [简体中文](README.md)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-245%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-330%20passed-brightgreen)
 ![Adapters](https://img.shields.io/badge/adapters-41-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-black)
 
@@ -45,7 +45,7 @@ pip install -r requirements.txt                    # or: pip install --target ve
 pip install -r requirements-dev.txt                # test/CI deps (pytest + httpx2), installed separately from runtime deps
 python -m camty keys set main --kind openai --base-url https://api.deepseek.com/v1 \
     --api-key sk-xxx --model-decide deepseek-reasoner   # LLM for engine/approvals
-python -m pytest tests/ -q                         # 245-test self check
+python -m pytest tests/ -q                         # 330-test self check
 ```
 
 Camty supports Python 3.10–3.13 (verified by the CI matrix on Ubuntu and Windows).
@@ -167,7 +167,7 @@ camty/
 │   └── deploy/               #   deploy kit (systemd/Caddyfile/env/deploy.sh/selfcheck.sh)
 ├── packs/                    # scenario packs: single-web / ext-web / int-ad
 ├── playbooks/                # tactic playbooks: web/ (10+ service fingerprints) + ad/
-├── tests/                    # 245 tests (16 suites: engine/authz/adversarial/MITM E2E/cracking)
+├── tests/                    # 330 tests (26 suites: engine/authz/adversarial/MITM E2E/cracking)
 ├── scripts/                  # helpers (build_beacon/pack_xor/smoke_browser/fetch_tools/build_dist)
 ├── docs/                     # design.md + c2-design.md (protocol & roadmap)
 ├── engagements/              # engagement configs (demo templates; real data gitignored)
