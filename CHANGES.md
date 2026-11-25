@@ -228,3 +228,36 @@
 ### 惯例确立
 - Release notes 双语（中英）；v0.3.0 / v0.3.1 已补英文节。
 - About 描述按审查指示改英文；正文口径以 README 双语为准。
+
+# R4：实验捕获缺陷修复批次（PE2 全权执行实验的六 bug + 适配器三修）
+
+依据：Camty 全权执行 PE2 两轮实验的 buglog（scripts/pe2_buglog.md）——8 项缺陷全部
+实锤留痕，其中 BUG-08（done 恒真桩）经平台权威裁决（0/3 completed）升级为 P0。
+
+## 引擎簇（camty/agent/engine.py + camty/storage.py）
+- **F-02 [P0] blocked 释放**：`mark_todolist_item` 对 blocked 同步 `intent_id = NULL`
+  ——三次终态的楔死根因（blocked intent 永久占用派发位）拔除；历史意图节点保留，
+  MAX_RESPAWN 防死循环。
+- **F-08a [P0] 完成判定去叙事化**：`_intent_produced` 从恒真桩（`return bool(intent)`）
+  改为 `real_calls > 0`——worker 纯叙事不再换 done，blocked → 规划者重派。
+- **F-08b [P0] 提示词硬化**：WORKER_SYSTEM 新增证据锚定规则——声称"偷到会话/读到
+  文件"的唯一合法依据是工具返回中真实出现该证据，无证据必须自述未达成。
+- **F-03 [P1] worker 决策重试**：`_chat_with_retry` 两次尝试——供应商瞬时抖动不再
+  整杀意图（实验实录：I-005 首枪未发即死于 120s 超时）。
+- **F-01 [P0] mission 注入**：objective.mission 全文（900 字符截断）进规划者提示词
+  ——此前只传 goal['title']，冷启动引擎不知道目标是谁（constraints 通道曾为绕过）。
+- **F-06 [P0] 空计划守卫**：LLM 输出空 todolist 时保留既有计划——91 步积累不被一次
+  空输出抹掉。
+
+## 适配器簇（browser / skill_lookup / recon_web）
+- **F-07 [P1] 动作透明化**：browser-action 摘要逐动作可见（`goto:{url}` / `click:{selector}` /
+  `fill:{selector}={值30字符}` 等 7 类），data 增结构化 actions 数组与 actions_digest；
+  browser-visit 补输入框计数——worker 自述完成从此可被外部审计（BUG-08 的观测面）。
+- **F-04 [P1] skill-lookup 双语别名**：26 组中英术语双向（password reset poisoning↔密码重置
+  等），短词词边界防误伤，别名命中降档评分——worker 英文主题不再对中文技能库落空。
+- **F-05 [P2] dir-scan 去重**：URL 归一化 key（scheme/host/path 小写+query 排序）运行内
+  去重，跨状态码保留首个，evidence 保留原始全量。
+
+## 计数
+- 全量测试 332 → **349 passed**（+6 引擎回归 +11 适配器回归）；主环境验证。
+- README 计数守卫同步：badge/正文 330→349、套件 26→27。
