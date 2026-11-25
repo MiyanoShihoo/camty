@@ -8,7 +8,7 @@
 
 English | [简体中文](README.md)
 
-![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-245%20passed-brightgreen)
 ![Adapters](https://img.shields.io/badge/adapters-41-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-black)
@@ -42,10 +42,13 @@ It is at once a toolbox (41 structured adapters), a command console (multi-agent
 ```bash
 git clone https://github.com/MiyanoShihoo/camty.git && cd camty
 pip install -r requirements.txt                    # or: pip install --target vendor <pkg>
+pip install -r requirements-dev.txt                # test/CI deps (pytest + httpx2), installed separately from runtime deps
 python -m camty keys set main --kind openai --base-url https://api.deepseek.com/v1 \
     --api-key sk-xxx --model-decide deepseek-reasoner   # LLM for engine/approvals
 python -m pytest tests/ -q                         # 245-test self check
 ```
+
+Camty supports Python 3.10–3.13 (verified by the CI matrix on Ubuntu and Windows).
 
 ## Usage
 

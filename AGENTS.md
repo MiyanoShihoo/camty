@@ -7,6 +7,7 @@
 
 ```bash
 pip install -r requirements.txt          # 缺依赖时也可 pip install --target vendor <pkg>
+pip install -r requirements-dev.txt      # 测试/CI 依赖（pytest + httpx2），跑测试或复现 CI 时安装
 python -m pytest tests/ -q               # 全绿（245 项）= 环境完好
 python -m camty keys list                # 已配置的 LLM provider
 ```

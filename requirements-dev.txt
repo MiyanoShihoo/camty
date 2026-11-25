@@ -1,0 +1,3 @@
+# 开发/CI 依赖（运行依赖见 requirements.txt）
+pytest>=8
+httpx2>=1

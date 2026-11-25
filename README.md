@@ -8,7 +8,7 @@
 
 [English](README.en.md) | 简体中文
 
-![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-245%20passed-brightgreen)
 ![Adapters](https://img.shields.io/badge/adapters-41-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-black)
@@ -48,9 +48,12 @@ HTML / docx / SRC 平台提交格式三态报告 + 复测对比；IM 推送（�
 ```bash
 git clone https://github.com/MiyanoShihoo/camty.git && cd camty
 pip install -r requirements.txt                    # 或 pip install --target vendor <pkg>
+pip install -r requirements-dev.txt                # 测试/CI 依赖（pytest + httpx2），与运行依赖分开安装
 python -m camty keys set main --kind openai --base-url https://api.deepseek.com/v1     --api-key sk-xxx --model-decide deepseek-reasoner   # 配置 LLM（引擎/审批用）
 python -m pytest tests/ -q                         # 245 项自检
 ```
+
+支持 Python 3.10–3.13（CI 矩阵在 Ubuntu/Windows 实测）。
 
 ## 使用方式
 
