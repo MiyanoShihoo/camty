@@ -210,3 +210,21 @@
 - 主环境 327 → **330 passed**；干净 venv 326+1s → **329 passed + 1 skipped**（新增 3 回归）。
 - 修复属产品代码（camty/storage.py、camty/agent/explore.py、camty/traffic.py），按 R3 裁决规则经操作者单独授权执行。
 - 撤 3.10/3.11 腿的替代方案被否决：两个缺陷均为全版本潜伏，撤腿等于静默真实缺陷，违背 CI"依赖/缺陷永久探针"定位。
+
+## R3 补记（审查意见落地）
+
+### httpx2 依赖澄清（操作者已核 PyPI）
+- httpx2 非 typosquat：PyPI 所有权归 pydantic 组织、维护者 Kludex、作者署名 Tom Christie——httpx 的官方延续（Pydantic 接管维护）。dev 依赖正确且必要（starlette 1.10 的 TestClient 直接要求）。
+- 记录项：httpx2 最新 2.16.2 要求 Python≥3.11，3.10 腿由 pip 自动解析到旧版 httpx2，属预期行为（resolves 一致，TestClient 两代均可用）。
+
+### P2c 补实现：README 计数一致性守卫
+- tests/test_hygiene.py 新增 TestReadmeCountConsistency：①tests badge 数字 == 正文两处测试计数（双语）；②正文套件数 == tests/test_*.py 实际文件数。增删测试文件漏改 README 必红。
+- 顺手同步：badge 245→330（实际主环境计数）、正文六处（自检/测试计数 245→330、套件数 16→26）。
+- 权威计数口径：全依赖主环境（330）；CI 各环境因 skip 差异计数不同，守卫只做静态一致性不做动态收集。
+
+### 可选未做项记录
+- A1 根因是 fastapi/starlette 无上界漂移；后续可加 constraints 锁文件求 CI 复现性（记录为可选项，不阻塞，与"探针暴露漂移"的现有哲学权衡后由操作者定夺）。
+
+### 惯例确立
+- Release notes 双语（中英）；v0.3.0 / v0.3.1 已补英文节。
+- About 描述按审查指示改英文；正文口径以 README 双语为准。
