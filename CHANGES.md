@@ -189,3 +189,24 @@
 
 ## 偏差记录
 - find_tool patch 目标改 base 命名空间（见上）；mock 返回值 POSIX 化；conftest 收尾顺序改为"采样→恢复→清 opener→判红"（先恢复再比较会让断言恒真）；A2 不用 skip 而用条件断言（保留其余覆盖）；CI 版本号加引号。
+
+## R3 增补：CI run#1/#2 事故记录与双根因修复（产品代码，另行授权批次）
+
+### CI 首跑（run#1，fe0aaec）7/8 红的分层定性
+- **cp1252 簇（windows 全腿）**：CI Windows 控制台默认 cp1252，`python -m camty` 子进程打印中文（[multi] 汇总 / orchestrator 横幅 / C2 服务端横幅）即 UnicodeEncodeError 崩——连锁打掉 test_gapclosure×1、test_c2_e2e×3（服务端未就绪）、test_countermeasures×2（拒连）。修法：ci.yml job 级 `PYTHONUTF8: "1"`（4bac311，CI 层）。本机全绿的掩盖原因：Git Bash 控制台为 UTF-8。
+- **run#2（4bac311）**：3.12/3.13 四腿全绿；剩余 3.10/3.11 四腿红，失败恰为 test_pack_plan_run + test_https_mitm_record 两个，双 OS × 两轮确定复现 → 非竞态噪声，进入根因挖掘。
+
+### 根因 1：Todolist.mark RMW 竞态（并发丢失更新）
+- 证据：① CI stdout 精确形态——[worker] I-005 done 后 todolist 仍 T1 [pending]、T3 [done]（两 worker 并发 mark，后提交者以旧快照全表重写覆盖前者）；② 代码检查：items() 读→内存改→sync_todolist DELETE 全表+重插，无跨操作原子性；③ PoC：setswitchinterval(1e-6) 下 300 轮并发 mark **丢失 270 次**（正常调度 0/300——CI ≤3.11 满载调度密度恰落在必中区间，故呈"版本边界"假象，实为全版本潜伏）。
+- 修复：storage 新增 mark_todolist_item（单条 UPDATE，sqlite 原子；note 语义保留：显式传入才覆写），Todolist.mark 改走该路径。
+- 回归：TestTodolistMarkConcurrency——放大切换密度 × 200 轮三线程并发，断言零丢失（旧实现此测试必红）。
+
+### 根因 2：CONNECT 排空死锁（TrafficProxy × ≤3.11 urllib）
+- 证据：① CPython 3.11 源码 do_open 的 tunnel_headers={}（CONNECT 裸发、零头）；② 3.14.4 实测 CONNECT 带 Host 头；③ 代理 _read_line 吃首行后 _recv_until(b"\r\n\r\n") 在裸形态下剩余恰为 "\r\n" 永等不齐——代理等字节、客户端等 200，双向死锁 → 30s 超时（CI 3.10/3.11 四腿两轮确定复现；3.12 起 urllib 给 CONNECT 加了头所以绿）。
+- 修复：提取 _drain_connect_headers——读至 buf==b"\r\n"（裸）或 endswith(b"\r\n\r\n")（带头）即止，双形态兼容。
+- 回归：TestConnectDrainShapes——socketpair 双形态回放，死锁形态以 settimeout(5) 快速失败而非挂死。
+
+### 修复后计数
+- 主环境 327 → **330 passed**；干净 venv 326+1s → **329 passed + 1 skipped**（新增 3 回归）。
+- 修复属产品代码（camty/storage.py、camty/agent/explore.py、camty/traffic.py），按 R3 裁决规则经操作者单独授权执行。
+- 撤 3.10/3.11 腿的替代方案被否决：两个缺陷均为全版本潜伏，撤腿等于静默真实缺陷，违背 CI"依赖/缺陷永久探针"定位。
