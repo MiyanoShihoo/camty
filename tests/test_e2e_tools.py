@@ -1,6 +1,6 @@
 """真实工具本地 E2E：httpx 探活 → nuclei 验证 → sqli-probe 注入（工具缺失时自动跳过）。
 
-用真实二进制（E:\AI tools 里的 httpx/nuclei）打本地靶机，校准适配器解析与全链状态流转。
+用真实二进制（本机已安装的 httpx/nuclei）打本地靶机，校准适配器解析与全链状态流转。
 """
 
 from __future__ import annotations
