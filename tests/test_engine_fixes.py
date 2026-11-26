@@ -57,12 +57,12 @@ class TestEvidenceAnchoredDone(unittest.TestCase):
                           "blocked 后 intent_id 必须释放（BUG-02），否则永久楔死")
         eng.close()
 
-    def test_real_tool_call_is_done(self):
+    def test_real_tool_call_with_success_marker_is_done(self):
         eng = make_eng(self.tmp)
         router = MockRouter([
             _plan(),
             _tool_call(),                                # 真实适配器调用
-            {"content": "侦察完成", "tool_calls": []},   # worker 总结
+            {"content": "侦察完成：确认无注册入口\n[RESULT: 成功]", "tool_calls": []},
             _plan("done"),
         ])
         engine = Engine(eng, router=router, registry=build_registry(), n_workers=2)
@@ -70,7 +70,32 @@ class TestEvidenceAnchoredDone(unittest.TestCase):
         items = {i["item_id"]: i for i in __import__("camty.agent.explore", fromlist=["Todolist"])
                  .Todolist(eng).items()}
         self.assertEqual(items["T1"]["status"], "done",
-                         "有真实工具调用的意图应记 done")
+                         "真实工具调用 + [RESULT: 成功] 标记的意图应记 done")
+        eng.close()
+
+
+class TestPlannerCannotResurrect(unittest.TestCase):
+    """BUG-10：规划者输出不得把 worker 判 blocked 的项翻成 done。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_planner_flip_blocked_to_done_is_guarded(self):
+        eng = make_eng(self.tmp)
+        # worker 真实调用后如实报告失败 → blocked；随后规划者输出 status=done 试图翻案
+        router = MockRouter([
+            _plan(),
+            _tool_call(),
+            {"content": "登录尝试全部被拒\n[RESULT: 失败]", "tool_calls": []},
+            _plan("done"),   # 规划者幻觉翻案
+            _plan("done"),   # 后续规划轮（无 ready 项）
+        ])
+        engine = Engine(eng, router=router, registry=build_registry(), n_workers=2)
+        engine.run()
+        items = {i["item_id"]: i for i in __import__("camty.agent.explore", fromlist=["Todolist"])
+                 .Todolist(eng).items()}
+        self.assertEqual(items["T1"]["status"], "blocked",
+                         "规划者不得把 blocked 项翻成 done——done 只能来自 worker 的成功标记")
         eng.close()
 
 
@@ -124,14 +149,13 @@ class TestWorkerRetry(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
                 self.script = [_plan(), _tool_call(),
-                               {"content": "完成", "tool_calls": []}, _plan("done")]
+                               {"content": "完成\n[RESULT: 成功]", "tool_calls": []}, _plan("done")]
 
             def chat(self, role, messages, tools=None, timeout=None):
                 self.calls += 1
                 if self.calls == 2:  # worker 第一次决策：瞬时抖动
                     raise RuntimeError("模拟瞬时网络错误")
                 return self.script.pop(0)
-
         router = FlakyRouter()
         engine = Engine(eng, router=router, registry=build_registry(), n_workers=2)
         engine.run()
@@ -140,6 +164,43 @@ class TestWorkerRetry(unittest.TestCase):
         self.assertEqual(items["T1"]["status"], "done",
                          "一次瞬时失败后重试应成功，意图不得打成 blocked")
         eng.close()
+
+
+class TestClaimedSuccess(unittest.TestCase):
+    """BUG-09：done 验证的是结果标记，不是动作量——fail-closed。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _run_worker(self, worker_summaries):
+        """worker: 真实工具调用一次 → 总结收尾；返回 item 状态。"""
+        eng = make_eng(self.tmp)
+        router = MockRouter([
+            _plan(),
+            _tool_call(),
+            {"content": worker_summaries, "tool_calls": []},
+            _plan(),  # 规划轮（item 状态由 worker 已标）
+        ])
+        engine = Engine(eng, router=router, registry=build_registry(), n_workers=2)
+        engine.run()
+        from camty.agent.explore import Todolist
+        items = {i["item_id"]: i for i in Todolist(eng).items()}
+        eng.close()
+        return items
+
+    def test_honest_failure_is_blocked(self):
+        """动手但如实报告失败 → blocked（获得重派），不再机械记 done。"""
+        items = self._run_worker("登录尝试 4 次全部被拒，未获得有效会话\n[RESULT: 失败]")
+        self.assertEqual(items["T1"]["status"], "blocked")
+
+    def test_success_marker_is_done(self):
+        items = self._run_worker("侦察完成：确认无注册入口，登录仅支持已知凭据\n[RESULT: 成功]")
+        self.assertEqual(items["T1"]["status"], "done")
+
+    def test_missing_marker_fails_closed(self):
+        """忘打标记 → 按失败处理（fail-closed），防止叙事漏网。"""
+        items = self._run_worker("完成了，看起来都试过了（未打标记）")
+        self.assertEqual(items["T1"]["status"], "blocked")
 
 
 class TestBlockedReleasesIntentStorage(unittest.TestCase):

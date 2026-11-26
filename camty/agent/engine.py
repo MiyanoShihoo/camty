@@ -12,6 +12,7 @@ ARTEX 引擎语义的 Camty 落地（单进程线程池实现，无外部依赖�
 from __future__ import annotations
 
 import json
+import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +59,13 @@ WORKER_SYSTEM = """你是红队交战的执行 worker，负责完成一条意图
 2. 范围外目标引擎会拦截，不要尝试绕过
 3. 利用类动作必须引用台账中 verified finding 的 ID
 4. 意图完成（产出 evidence/fact）或无有效动作时输出总结文本，不再调用工具
+5. 完成判定必须锚定客观证据：你声称"偷到会话/读到文件/拿到权限"的唯一合法依据
+   是工具返回中真实出现了该证据（如 exploit server 访问日志里出现目标 cookie、
+   响应体中出现文件内容、响应状态发生实际变化）。证据不存在时，总结必须如实
+   声明"未达成/未验证"并描述卡点——自述成功而无证据会被引擎复核判 blocked 并重派。
+6. 结束总结的最后一行必须是判定标记：意图目标达成写 [RESULT: 成功]，
+   尝试了但未达成写 [RESULT: 失败]。"确认无此漏洞"类侦察结论属成功。
+   引擎按标记机械判定——无标记按失败处理，诚实报告失败会获得重派机会。
 
 意图：{intent}
 相关上下文：{payload}
@@ -247,6 +255,12 @@ class Engine:
                 "intent_id": prev.get("intent_id"),
                 "note": str(item.get("note", prev.get("note", ""))),
             })
+        # BUG-10 守卫：规划者不得把 worker 判 blocked 的项翻成 done——
+        # done 的唯一合法来源是 worker 的 [RESULT: 成功] 标记（防规划者
+        # 幻觉状态越权推翻一线执行判定）
+        for item in merged:
+            if existing.get(item["item_id"], {}).get("status") == "blocked"                     and item["status"] == "done":
+                item["status"] = "blocked"
         # 空计划守卫：LLM 输出空/全无效 todolist 时不得清空既有计划（BUG-06 实录：
         # 91 步积累的 T1-T6 全链被一次空输出抹掉，下一轮被迫重新规划）
         if not merged and existing:
@@ -469,7 +483,7 @@ class Engine:
                 if notes:
                     messages.append({"role": "user", "content": as_prompt(notes)})
                     print(f"[steer] {node_id} 收到 operator 转向: {notes[0]['message'][:60]}")
-        ok = self._intent_produced(intent, real_calls)
+        ok = self._intent_produced(intent, real_calls) and self._claimed_success(digest_parts)
         return ok, "; ".join(digest_parts) or "（无总结输出）"
 
     def _chat_with_retry(self, messages: list, tools: list) -> dict:
@@ -531,6 +545,19 @@ class Engine:
             return self._tool_content_json({"error": str(exc)})
         except Exception as exc:  # noqa: BLE001 - 单工具失败不终止意图
             return self._tool_content_json({"error": str(exc)})
+
+    @staticmethod
+    def _claimed_success(digest_parts: list) -> bool:
+        """BUG-09：完成判定验证结果，不是动作量。
+
+        worker 诚实报告失败（动手但被拒）或忘打标记 → 一律按失败处理
+        （fail-closed）→ blocked → 规划者换路重派。只有总结末段带
+        [RESULT: 成功] 标记且有过真实动作才记 done——标记协议由
+        WORKER_SYSTEM 规则 6 约定，"确认无此漏洞"类侦察结论也属成功。
+        """
+        if not digest_parts:
+            return False
+        return bool(re.search(r"\[RESULT:\s*成功\]", digest_parts[-1]))
 
     def _intent_produced(self, intent: dict, real_calls: int = 0) -> bool:
         """意图是否有真实产出（BUG-08：完成是验证状态，不是叙事状态）。

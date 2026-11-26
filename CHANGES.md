@@ -261,3 +261,21 @@
 ## 计数
 - 全量测试 332 → **349 passed**（+6 引擎回归 +11 适配器回归）；主环境验证。
 - README 计数守卫同步：badge/正文 330→349、套件 26→27。
+
+## R4b：BUG-09/10 修复（第三轮 1h 检测实锤，fail-closed 结果判定）
+
+依据：第三轮 1h 检测（03:03 收网）——R4 后引擎机械健康质变（三轮零楔死、断点续跑、
+动作全透明），但平台仍 0/3，取证定位两个新缺陷：
+
+- **BUG-09 [P0] done 验证"动了手"不验证"成了"**：worker 真实开枪（4 次登录全被拒）
+  如实报告失败，`real_calls > 0` 仍机械记 done——修复为**结果标记协议**：
+  WORKER_SYSTEM 规则 6 约定总结末行 `[RESULT: 成功|失败]`；引擎 `_claimed_success`
+  fail-closed 解析——无标记/失败标记一律 blocked，诚实失败获得重派机会；
+  "确认无此漏洞"类侦察结论属成功。
+- **BUG-10 [P0] 规划者状态越权**：merge 时规划者 LLM 输出可直接写 item 状态，
+  可把 worker 判 blocked 的项翻成 done（幻觉翻案）——守卫：blocked→done 的
+  翻案路径封死，done 的唯一合法来源是 worker 的成功标记。
+- 顺带修正：R4 批次中 F-08b（WORKER_SYSTEM 证据锚定规则 5）因脚本中途失败
+  实际未落盘（本轮复核发现），已随规则 6 一并补齐。
+- 回归：tests/test_engine_fixes.py 增至 10 项（标记协议三态/规划者翻案守卫），
+  test_artex_port 既有用例按标记协议同步；全量 **353 passed**，README 计数同步。

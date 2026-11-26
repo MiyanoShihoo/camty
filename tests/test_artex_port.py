@@ -322,7 +322,7 @@ class TestEngineLLM(unittest.TestCase):
         router = self.MockRouter([
             {"content": todolist_json, "tool_calls": []},   # 规划 1
             worker_tool,                                      # worker 工具调用
-            {"content": "子域侦察完成", "tool_calls": []},    # worker 总结
+            {"content": "子域侦察完成\n[RESULT: 成功]", "tool_calls": []},  # worker 总结（结果标记协议）
             {"content": todolist_json.replace('"pending"', '"done"'), "tool_calls": []},  # 规划 2
         ])
         engine = Engine(eng, router=router, registry=build_registry(), n_workers=2,
