@@ -279,3 +279,42 @@
   实际未落盘（本轮复核发现），已随规则 6 一并补齐。
 - 回归：tests/test_engine_fixes.py 增至 10 项（标记协议三态/规划者翻案守卫），
   test_artex_port 既有用例按标记协议同步；全量 **353 passed**，README 计数同步。
+
+## R5：BUG-11/12 修复 + agent-orchestrator 内置（第四轮 1h 检测实锤）
+
+依据：第四轮 1h 检测（R4b 引擎，17:15 收网，平台 0/3）——修复生效的部分全部生效
+（三轮零楔死、动作可取证），但两个新缺陷让引擎 27 分钟冻结在 47 条 activity：
+
+- **BUG-11 [P0] 标记协议不遵从**：I-002 侦察输出质量极高（完整 sitemap、错误语义、
+  认证机制全带证据）但总结未带 `[RESULT: 成功]` 标记 → fail-closed 判 blocked。
+  长总结场景 LLM 对"末行格式"类指令遵从率极低——修复为**结果上报工具化**：
+  worker 工具集新增 `report-result`（verdict=成功|失败 + evidence），拦截不计
+  real_calls（纯叙事上报不算产出，BUG-08a 语义不放松）；`_evaluate_result` 以工具
+  上报为权威判定（覆盖文本标记），未上报时回退 `_claimed_success` 文本解析
+  （老协议兜底，向后兼容）。工具调用遵从率≈100%，文本格式协议退役为遗留通道。
+- **BUG-12 [P0] blocked 依赖饿死（死锁新形态）**：T1/T2 blocked 后 T3 的
+  depends_on 永不满足 → 整链冻结、重启全部秒退。修复为 **blocked 生命周期**：
+  ①引擎无事可派时 `_rearm_blocked` 回收仍有重派预算的 blocked 项置 pending
+  （重臂不变量 rearms < dispatches：每次重臂必须先兑现成一次真实派发，防规划者
+  状态乒乓空转）；②dispatches ≥ MAX_RESPAWN 的项永久 blocked，note 标注
+  "重派预算耗尽"；③`Todolist.summary()` 行尾附 note 片段——规划者可见失败原因
+  与耗尽标记；④PLANNER_SYSTEM 规则 6：重派前必须改写打法，依赖耗尽项的条目
+  必须重排路线；⑤死循环检测改 `count > MAX_RESPAWN`（重臂后的合法重派不得误拦）。
+- **BUG-10 守卫扩展（规格外必要修正，测试实跑暴露）**：两步翻案路径
+  blocked → 引擎重臂 pending → 规划者翻 done 会绕过原守卫——现对"重臂后
+  pending"的 done 翻案同样拒绝（恢复为 pending 待重派），done 唯一来源仍是
+  worker 判定。
+- **agent-orchestrator 编排技能内置**：ZCode 的 agent-orchestrator 技能全包
+  入库 skills/（grill 质询/独立评审/SDS 设计规格/恢复协议）；skill-lookup 别名表
+  新增 orchestrator ↔ 编排/多智能体协作/任务编排 双向组，工具描述同步。
+- **planner_skill 注入通道**：配置 `planner_skill: <技能名>` → 规划者每轮
+  system 提示词追加该技能正文（复用 skill-lookup 根目录探测与 6000 字符截断，
+  惰性缓存，缺失静默降级）——规划者开局即按编排方法论工作，不等 worker 卡住
+  才检索。psxam2 启用 agent-orchestrator（第五轮 2h 完整测试配置）。
+- 修复：test_blackboard 两个引擎用例的 MockRouter 脚本按 R4b 语义升级
+  （worker 走真实调用 + report-result 上报，消除了 R5 重臂带来的 30s×2 退避睡眠），
+  断言不变；0.13s 完成。
+- 回归：tests/test_engine_fixes.py 增至 16 项（工具化判定三态/重臂三态）；
+  新增 tests/test_planner_skill.py（注入/缺失降级/无配置三态）；
+  test_modules.py 新增编排别名端到端 + 真实库内置契约（打包环境 skip 先例沿用）；
+  全量 **364 passed**，套件 27→28，README 计数同步。

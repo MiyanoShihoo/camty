@@ -523,6 +523,42 @@ class TestSkillLookupBilingual(unittest.TestCase):
         self.assertTrue(result.data["hits"], "deserialization 应命中含 反序列化 的技能")
         self.assertTrue(all(h["matched"] == "反序列化" for h in result.data["hits"]))
 
+    def test_orchestrator_alias_real_library(self):
+        """编排别名组端到端：中文主题经别名命中真实库的 agent-orchestrator 并排位第一。
+
+        该别名组不做夹具机制测试——orchestrator 名称档（90 分）恒被真实库
+        agent-orchestrator 占据，夹具技能进不了 MAX_HITS=3 的前排。
+        """
+        repo_skills = Path(__file__).resolve().parent.parent / "skills"
+        if not repo_skills.is_dir():
+            self.skipTest("仓库 skills/ 目录不存在（打包环境）")
+        result = self._run_topic(repo_skills, "多智能体协作")
+        self.assertTrue(result.data["hits"], "中文编排主题应经别名命中")
+        top = result.data["hits"][0]
+        self.assertEqual(top["name"], "agent-orchestrator")
+        self.assertEqual(top["matched"], "orchestrator",
+                         "命中别名应为别名组内的 orchestrator")
+
+    def test_real_library_ships_agent_orchestrator(self):
+        """内置契约：仓库技能库随发行携带 agent-orchestrator，名称与中文主题双路可查。"""
+        repo_skills = Path(__file__).resolve().parent.parent / "skills"
+        if not repo_skills.is_dir():
+            self.skipTest("仓库 skills/ 目录不存在（打包环境）")
+        from camty.adapters.skill_lookup import SkillLookupAdapter
+
+        adapter = SkillLookupAdapter()
+        with mock.patch.dict(os.environ, {"CAMTY_SKILL_EXTRA_DIRS": ""}):
+            by_name = adapter.run({"name": "agent-orchestrator"}, self._ctx())
+        self.assertTrue(by_name.data["hits"], "技能库必须随仓库携带 agent-orchestrator")
+        self.assertIn("orchestrator", by_name.data["hits"][0]["content"].lower(),
+                      "名称检索应返回技能正文")
+
+        with mock.patch.dict(os.environ, {"CAMTY_SKILL_EXTRA_DIRS": ""}):
+            by_topic = adapter.run({"topic": "多智能体协作"}, self._ctx())
+        self.assertTrue(by_topic.data["hits"], "中文编排主题应命中真实技能库")
+        self.assertEqual(by_topic.data["hits"][0]["name"], "agent-orchestrator",
+                         "编排方法论技能应排位第一")
+
 
 # ---------------------------------------------------------------------------
 # F-05：dir-scan content-discovery findings 按归一化 URL 去重
