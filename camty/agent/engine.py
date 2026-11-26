@@ -37,7 +37,7 @@ PER_INTENT_STEPS = 12
 PLAN_TIMEOUT = 150.0    # 规划调用超时：reasoning 模型长 prompt 实测 >45s（onyx-ai 实战校准）
 WORKER_TIMEOUT = 120.0  # worker 单次 LLM 调用超时
 MAX_PLAN_FAILURES = 3   # 规划连续失败次数 → 降级 pack 确定性模式
-MAX_RESPAWN = 2         # 同一 item 重复派意图上限 → 死循环检测
+MAX_RESPAWN = 2         # 同一 item 派意图上限（最多派发 MAX_RESPAWN 次）→ 死循环检测
 
 PLANNER_SYSTEM = """你是渗透交战的规划者（planner）。基于当前态势维护攻击链 todolist。
 
@@ -47,6 +47,10 @@ PLANNER_SYSTEM = """你是渗透交战的规划者（planner）。基于当前�
 3. 串行利用链用 depends_on 表达；侦察类无依赖项并行
 4. 已被台账 verified finding 满足的步骤标 done；被证伪/无法推进的标 blocked
 5. 新步骤只加有真实攻击价值的；宁少勿滥
+6. blocked 项会在引擎空闲时自动重派（note 标"重派重试"）——重派前改写该项打法
+   （title/note 给出不同思路），不要原样重试。note 标"重派预算耗尽"的项已永久
+   blocked，依赖它的条目永远不会执行——必须为其重排路线（改 depends_on/换打法/
+   新建替代项）。
 
 输出格式：
 {"todolist": [{"item_id": "T1", "title": "枚举子域", "depends_on": [], "status": "pending", "note": ""}],
@@ -63,9 +67,10 @@ WORKER_SYSTEM = """你是红队交战的执行 worker，负责完成一条意图
    是工具返回中真实出现了该证据（如 exploit server 访问日志里出现目标 cookie、
    响应体中出现文件内容、响应状态发生实际变化）。证据不存在时，总结必须如实
    声明"未达成/未验证"并描述卡点——自述成功而无证据会被引擎复核判 blocked 并重派。
-6. 结束总结的最后一行必须是判定标记：意图目标达成写 [RESULT: 成功]，
-   尝试了但未达成写 [RESULT: 失败]。"确认无此漏洞"类侦察结论属成功。
-   引擎按标记机械判定——无标记按失败处理，诚实报告失败会获得重派机会。
+6. 结束前必须调用 report-result 工具上报判定：目标达成（或"确认无此漏洞"类侦察结论）
+   时 verdict=成功，尝试了但未达成时 verdict=失败。上报后输出最终总结文本结束
+   （不再调用工具）。引擎以工具上报为权威判定——未上报且总结无 [RESULT:] 标记时
+   按失败处理，诚实报失败会获得重派机会。
 
 意图：{intent}
 相关上下文：{payload}
@@ -110,7 +115,9 @@ class Engine:
         self._claim_lock = threading.Lock()
         self._steps = 0
         self._plan_failures = 0     # 连续失败计数（降级阈值）
-        self._spawn_counts: dict[str, int] = {}  # 死循环检测：item 重派次数
+        self._spawn_counts: dict[str, int] = {}   # 死循环检测：item 派发次数
+        self._rearm_counts: dict[str, int] = {}   # 重臂计数，防规划者状态乒乓
+        self._skill_block: str | None = None     # planner_skill 方法论块（惰性加载缓存）
 
     # ---- 生命周期 ----
 
@@ -129,6 +136,9 @@ class Engine:
                 break
             done = self._drain_workers(goal)
             if not done and not spawned:
+                rearmed = self._rearm_blocked()
+                if rearmed:
+                    continue
                 if self.router is not None and self._plan_failures >= 1:
                     if self._plan_failures < MAX_PLAN_FAILURES:
                         # 限流类失败退避重试（15s×次数），避免打在限流窗口上（crouter 实战校准）
@@ -189,9 +199,11 @@ class Engine:
             item_id = item["item_id"]
             if item.get("intent_id"):
                 continue
-            # 死循环检测：同一 item 反复重派（LLM 把 blocked/pending 状态来回翻）→ 强制封死
+            # 死循环检测：派发超 MAX_RESPAWN 次（规划者把 blocked/pending 状态来回翻）
+            # → 强制封死。count 记的是已派发次数，恰好第 MAX_RESPAWN 次派发放行
+            # （BUG-12：重臂后的合法重派不得被此分支误拦）
             count = self._spawn_counts.get(item_id, 0)
-            if count >= MAX_RESPAWN:
+            if count > MAX_RESPAWN:
                 self.todolist.mark(item_id, "blocked", note=f"重复派意图 {count} 次超限，判死循环")
                 print(f"[plan] 死循环检测：{item_id} 重派 {count} 次，标 blocked")
                 continue
@@ -227,7 +239,7 @@ class Engine:
         )
         try:
             resp = self.router.chat(ROLE_DECIDE, [
-                {"role": "system", "content": PLANNER_SYSTEM},
+                {"role": "system", "content": PLANNER_SYSTEM + self._planner_skill_block()},
                 {"role": "user", "content": prompt},
             ], None, timeout=PLAN_TIMEOUT)
             data = _parse_json_content(resp.get("content", "") or "")
@@ -256,17 +268,52 @@ class Engine:
                 "note": str(item.get("note", prev.get("note", ""))),
             })
         # BUG-10 守卫：规划者不得把 worker 判 blocked 的项翻成 done——
-        # done 的唯一合法来源是 worker 的 [RESULT: 成功] 标记（防规划者
-        # 幻觉状态越权推翻一线执行判定）
+        # done 的唯一合法来源是 worker 的成功判定（防规划者幻觉状态越权
+        # 推翻一线执行判定）。BUG-12 重臂后的 pending 同样受保护：重臂项
+        # 是 worker 失败后等待重派的状态，规划者直接翻 done 等于绕过重试
+        # 伪造完成（两步翻案：blocked → 引擎重臂 pending → 规划者 done）。
         for item in merged:
-            if existing.get(item["item_id"], {}).get("status") == "blocked"                     and item["status"] == "done":
-                item["status"] = "blocked"
+            prev = existing.get(item["item_id"], {})
+            rearmed_pending = (prev.get("status") == "pending"
+                               and not prev.get("intent_id")
+                               and self._rearm_counts.get(item["item_id"], 0) > 0)
+            if item["status"] == "done" and (prev.get("status") == "blocked"
+                                             or rearmed_pending):
+                item["status"] = prev.get("status") or "blocked"
         # 空计划守卫：LLM 输出空/全无效 todolist 时不得清空既有计划（BUG-06 实录：
         # 91 步积累的 T1-T6 全链被一次空输出抹掉，下一轮被迫重新规划）
         if not merged and existing:
             print("[plan] LLM 输出空 todolist，保留既有计划不覆写")
             return
         self.todolist.replace(merged)
+
+    def _planner_skill_block(self) -> str:
+        """planner_skill 配置的方法论块（惰性加载，进程内缓存）。
+
+        配置 planner_skill: <技能名> → 规划者每轮 system 提示词追加该技能正文
+        （沿用 skill-lookup 的根目录探测与 6000 字符截断）。规划者开局即按该
+        方法论工作，而不是等 worker 卡住才经 skill-lookup 检索。缺失时静默降级。
+        """
+        if self._skill_block is None:
+            self._skill_block = self._load_planner_skill()
+        return self._skill_block
+
+    def _load_planner_skill(self) -> str:
+        name = str(self.eng.cfg.get("planner_skill") or "").strip()
+        if not name:
+            return ""
+        from camty.adapters.skill_lookup import SkillLookupAdapter
+
+        try:
+            result = SkillLookupAdapter().run({"name": name}, None)
+        except Exception:  # noqa: BLE001 - 方法论加载失败不阻断交战
+            return ""
+        hits = (getattr(result, "data", None) or {}).get("hits") or []
+        body = str(hits[0].get("content", "")) if hits else ""
+        if not body:
+            return ""
+        return (f"\n\n编排方法论技能（{name}，按其纪律执行规划；其中示例按本交战语义映射，"
+                f"不适用部分按最小充分原则跳过）:\n{body}")
 
     def _pack_plan(self, goal: dict) -> None:
         """确定性模式：pack plan: 段 → todolist（首次），requires 由引擎照常校验。"""
@@ -290,6 +337,36 @@ class Engine:
         if not items:
             raise KeyError(f"场景包 {self.eng.pack['name']} 无 plan: 段（确定性引擎需要依赖图声明）")
         self.todolist.replace(items)
+
+    def _rearm_blocked(self) -> int:
+        """BUG-12：blocked 生命周期——引擎无事可派时回收仍有重派预算的 blocked 项。
+
+        重臂不变量 rearms < dispatches：每次重臂必须先兑现成一次真实派发才能再次重臂
+        （防规划者把 pending/block 来回翻的乒乓空转）。dispatches >= MAX_RESPAWN 的项
+        永久 blocked，note 标注"重派预算耗尽"供规划者重排依赖它的条目。
+        """
+        rearmed = 0
+        for item in self.todolist.items():
+            if item["status"] != "blocked" or item.get("intent_id"):
+                continue
+            item_id = item["item_id"]
+            dispatches = self._spawn_counts.get(item_id, 0)
+            rearms = self._rearm_counts.get(item_id, 0)
+            if dispatches >= MAX_RESPAWN:
+                note = item.get("note") or ""
+                if "重派预算耗尽" not in note:
+                    self.todolist.mark(item_id, "blocked",
+                                       note=note[:150] + " | 重派预算耗尽")
+                continue
+            if rearms >= dispatches:
+                continue  # 乒乓守卫：重臂必须先兑现成一次真实派发
+            self._rearm_counts[item_id] = rearms + 1
+            self.todolist.mark(item_id, "pending",
+                               note=f"重派重试（第 {dispatches + 1} 次尝试）: "
+                                    f"{(item.get('note') or '')[:150]}")
+            print(f"[plan] 重臂 blocked 项 {item_id}（已派发 {dispatches} 次）")
+            rearmed += 1
+        return rearmed
 
     def _set_item_intent(self, item_id: str, intent_id: str) -> None:
         items = self.todolist.items()
@@ -419,6 +496,21 @@ class Engine:
         from camty.agent.goals import constraints_prompt
 
         tools = [a.tool_def() for a in self.registry.values() if a.available()]
+        # BUG-11：结果上报工具化——文本末行标记协议在长总结场景遵从率极低，
+        # 工具调用遵从率≈100%。report-result 是意图完成判定的唯一权威上报通道。
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "report-result",
+                "description": "上报意图执行结果判定（结束前必须调用；意图完成状态的唯一权威判定依据）",
+                "parameters": {"type": "object",
+                               "properties": {
+                                   "verdict": {"type": "string", "enum": ["成功", "失败"]},
+                                   "evidence": {"type": "string",
+                                                "description": "支撑判定的客观证据摘要（工具返回中的真实证据）"}},
+                               "required": ["verdict"]},
+            },
+        })
         tools.append({
             "type": "function",
             "function": {
@@ -460,6 +552,7 @@ class Engine:
         ]
         digest_parts = []
         real_calls = 0  # 真实适配器调用计数（叙事不算产出，BUG-08）
+        reported = None  # report-result 工具上报的判定（BUG-11：权威，覆盖文本标记）
         for step_i in range(PER_INTENT_STEPS):
             if self._steps >= self.max_total_steps:
                 return (bool(digest_parts), "预算耗尽: " + "; ".join(digest_parts[-2:]))
@@ -473,6 +566,19 @@ class Engine:
                 break
             for tc in resp["tool_calls"]:
                 self._steps += 1
+                args = tc.get("arguments") or {}
+                if tc.get("name") == "report-result":
+                    # BUG-11：上报拦截——不执行工具、不计 real_calls（纯叙事上报不算产出）
+                    reported = "成功" if "成功" in str(args.get("verdict", "")) else "失败"
+                    self.graph.trace(node_id, step_i, "report-result",
+                                     {"verdict": reported,
+                                      "evidence": str(args.get("evidence", ""))[:300]},
+                                     f"worker 上报判定: {reported}")
+                    messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": self._tool_content_json(
+                                         {"ok": True, "verdict": reported,
+                                          "message": "判定已记录。请输出最终总结文本结束，不再调用工具。"})})
+                    continue
                 if tc.get("name") in self.registry:
                     real_calls += 1
                 content = self._execute_tool_call(node_id, step_i, tc)
@@ -483,7 +589,7 @@ class Engine:
                 if notes:
                     messages.append({"role": "user", "content": as_prompt(notes)})
                     print(f"[steer] {node_id} 收到 operator 转向: {notes[0]['message'][:60]}")
-        ok = self._intent_produced(intent, real_calls) and self._claimed_success(digest_parts)
+        ok = self._intent_produced(intent, real_calls) and self._evaluate_result(reported, digest_parts)
         return ok, "; ".join(digest_parts) or "（无总结输出）"
 
     def _chat_with_retry(self, messages: list, tools: list) -> dict:
@@ -545,6 +651,18 @@ class Engine:
             return self._tool_content_json({"error": str(exc)})
         except Exception as exc:  # noqa: BLE001 - 单工具失败不终止意图
             return self._tool_content_json({"error": str(exc)})
+
+    @staticmethod
+    def _evaluate_result(reported: str | None, digest_parts: list) -> bool:
+        """BUG-11：判定来源优先级——工具上报为权威，文本标记降级为遗留兜底。
+
+        report-result 工具调用遵从率≈100%（长总结场景文本末行标记遵从率极低，
+        优质侦察工作因忘打标记被 fail-closed 误杀）。worker 未走工具上报时
+        才回退 _claimed_success 的 [RESULT: 成功] 文本解析（老 worker/降级路径）。
+        """
+        if reported is not None:
+            return reported == "成功"
+        return Engine._claimed_success(digest_parts)
 
     @staticmethod
     def _claimed_success(digest_parts: list) -> bool:

@@ -160,5 +160,7 @@ class Todolist:
         return "\n".join(
             f"{i['item_id']} [{i['status']}] {i['title']}"
             + (f"（前置 {','.join(i['depends_on'])}）" if i.get("depends_on") else "")
+            # BUG-12：note 片段随行暴露——规划者需要看见失败原因与"重派预算耗尽"标记
+            + (f" | {(i.get('note') or '')[:60]}" if i.get("note") else "")
             for i in items
         )

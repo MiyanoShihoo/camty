@@ -108,14 +108,31 @@ class TestEngineBlackboardInheritance(unittest.TestCase):
             {"item_id": "T1", "title": "侦察", "depends_on": [], "status": "done"},
             {"item_id": "T2", "title": "利用", "depends_on": ["T1"], "status": "pending"}],
             "spawn": ["T2"]}
+        plan3 = {"todolist": [
+            {"item_id": "T1", "title": "侦察", "depends_on": [], "status": "done"},
+            {"item_id": "T2", "title": "利用", "depends_on": ["T1"], "status": "done"}],
+            "spawn": []}
         router = RecordingRouter([
             {"content": json.dumps(plan1), "tool_calls": []},        # planner 1（只派 T1）
             {"content": "", "tool_calls": [
                 {"id": "c1", "name": "blackboard-note",
                  "arguments": {"kind": "waf", "note": "example.com 有 WAF"}}]},  # worker T1 记黑板
+            {"content": "", "tool_calls": [
+                {"id": "c2", "name": "mock-subfinder",
+                 "arguments": {"domain": "example.com"}}]},          # worker T1 真实调用
+            {"content": "", "tool_calls": [
+                {"id": "c3", "name": "report-result",
+                 "arguments": {"verdict": "成功", "evidence": "侦察完成"}}]},  # worker T1 上报
             {"content": "侦察完成", "tool_calls": []},               # worker T1 总结
             {"content": json.dumps(plan2), "tool_calls": []},        # planner 2（派 T2）
+            {"content": "", "tool_calls": [
+                {"id": "c4", "name": "mock-subfinder",
+                 "arguments": {"domain": "example.com"}}]},          # worker T2 真实调用
+            {"content": "", "tool_calls": [
+                {"id": "c5", "name": "report-result",
+                 "arguments": {"verdict": "成功", "evidence": "利用完成"}}]},  # worker T2 上报
             {"content": "利用完成", "tool_calls": []},               # worker T2 总结
+            {"content": json.dumps(plan3), "tool_calls": []},        # planner 3（全 done，收束）
         ])
         engine = Engine(eng, router=router, registry=build_registry(), max_total_steps=10)
         engine.run()
@@ -123,8 +140,8 @@ class TestEngineBlackboardInheritance(unittest.TestCase):
         notes = eng.db.load_notes()
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0]["kind"], "waf")
-        # 第 2 轮 planner（chat #4）继承黑板
-        planner_prompt = router.messages_seen[3][-1]["content"]
+        # 第 2 轮 planner（chat #6）继承黑板
+        planner_prompt = router.messages_seen[5][-1]["content"]
         self.assertIn("example.com 有 WAF", planner_prompt)
 
     def test_worker_tool_list_contains_blackboard(self):
@@ -146,9 +163,18 @@ class TestEngineBlackboardInheritance(unittest.TestCase):
                 return super().chat(role, messages, tools, timeout)
 
         router = ToolCapturingRouter([
-            {"content": todolist, "tool_calls": []},
-            {"content": "侦察完成", "tool_calls": []},
-            {"content": done_list, "tool_calls": []},
+            {"content": todolist, "tool_calls": []},                  # planner 1（派 T1）
+            {"content": "", "tool_calls": [
+                {"id": "c1", "name": "blackboard-note",
+                 "arguments": {"kind": "lesson", "note": "观察"}}]},   # worker T1 记黑板
+            {"content": "", "tool_calls": [
+                {"id": "c2", "name": "mock-subfinder",
+                 "arguments": {"domain": "example.com"}}]},            # worker T1 真实调用
+            {"content": "", "tool_calls": [
+                {"id": "c3", "name": "report-result",
+                 "arguments": {"verdict": "成功", "evidence": "侦察完成"}}]},  # worker T1 上报
+            {"content": "侦察完成", "tool_calls": []},                 # worker T1 总结
+            {"content": done_list, "tool_calls": []},                  # planner 2（T1 done，收束）
         ])
         engine = Engine(eng, router=router, registry=build_registry(), max_total_steps=10)
         engine.run()
